@@ -1,0 +1,386 @@
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
+
+import yaml
+from dotenv import dotenv_values
+
+from ashare_agent.domain.instruments import get_market_profile
+
+
+PLACEHOLDER_SECRETS = {"replace-me", "changeme", "your-key", "..."}
+
+
+def _secret_value(*names: str) -> str | None:
+    for name in names:
+        value = str(os.getenv(name) or "").strip()
+        if value and value.lower() not in PLACEHOLDER_SECRETS:
+            return value
+    return None
+
+
+def has_configured_secret(name: str) -> bool:
+    return _secret_value(name) is not None
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Validated application settings with no source-tree assumptions."""
+
+    project_root: Path
+    app_env: str
+    backend_api_key: str | None
+    database_path: Path
+    universe_path: Path
+    cache_path: Path
+    execution_mode: str
+    decision_workers: int
+    decision_queue_capacity: int
+    decision_task_timeout_seconds: int
+    max_as_of_skew_minutes: int
+    data_mode: str
+    tushare_token: str | None
+    tushare_timeout_seconds: int
+    market_history_days: int
+    news_lookback_days: int
+    news_top_k: int
+    llm_api_key: str | None
+    llm_base_url: str
+    llm_model: str
+    llm_temperature: float
+    llm_max_tokens: int
+    llm_timeout_seconds: int
+    llm_max_retries: int
+    min_cash_ratio: Decimal
+    max_position_ratio: Decimal
+    max_positions: int
+    buy_fee_buffer_ratio: Decimal
+    market_close_hour: int
+    market_close_minute: int
+    decision_engine_mode: str = "single_llm"
+    llm_structured_output_mode: str = "auto"
+    multi_agent_shortlist_size: int = 8
+    multi_agent_parallelism: int = 3
+    multi_agent_max_calls: int = 32
+    multi_agent_output_retries: int = 1
+    multi_agent_semantic_retries: int = 1
+    multi_agent_min_analysts: int = 2
+    multi_agent_min_risk_reviews: int = 2
+    multi_agent_technical_weight: float = 0.35
+    multi_agent_fundamental_weight: float = 0.40
+    multi_agent_news_weight: float = 0.25
+    active_market: str = "CN"
+    market_data_provider: str = "tushare"
+    universe_selector: str = "lightgbm"
+    selection_data_provider: str = "tushare"
+    selection_config_path: Path | None = None
+    selection_data_path: Path | None = None
+    candidate_pool_path: Path = Path("data/candidate_pools")
+    selection_history_calendar_days: int = 1_100
+
+    def __post_init__(self) -> None:
+        root = self.project_root.resolve()
+        object.__setattr__(self, "project_root", root)
+        for field_name in (
+            "database_path",
+            "universe_path",
+            "cache_path",
+            "candidate_pool_path",
+        ):
+            value = getattr(self, field_name)
+            resolved = value if value.is_absolute() else root / value
+            object.__setattr__(self, field_name, resolved.resolve())
+        for field_name in ("selection_config_path", "selection_data_path"):
+            value = getattr(self, field_name)
+            if value is not None:
+                resolved = value if value.is_absolute() else root / value
+                object.__setattr__(self, field_name, resolved.resolve())
+        if self.app_env.lower() == "production" and not self.backend_api_key:
+            raise ValueError("BACKEND_API_KEY is required when APP_ENV=production")
+        if self.execution_mode not in {"process", "thread", "inline"}:
+            raise ValueError(
+                "DECISION_EXECUTION_MODE must be 'process', 'thread', or 'inline'"
+            )
+        if self.data_mode not in {"auto", "offline_only"}:
+            raise ValueError("DATA_MODE must be 'auto' or 'offline_only'")
+        if self.decision_workers < 1:
+            raise ValueError("DECISION_WORKERS must be at least 1")
+        if self.decision_queue_capacity < 0:
+            raise ValueError("DECISION_QUEUE_CAPACITY cannot be negative")
+        if self.decision_task_timeout_seconds < 30:
+            raise ValueError("DECISION_TASK_TIMEOUT_SECONDS must be at least 30")
+        if self.max_as_of_skew_minutes < 1:
+            raise ValueError("MAX_AS_OF_SKEW_MINUTES must be at least 1")
+        if self.tushare_timeout_seconds < 1:
+            raise ValueError("TUSHARE_TIMEOUT_SECONDS must be positive")
+        if self.market_history_days < 30:
+            raise ValueError("MARKET_HISTORY_DAYS must be at least 30")
+        if self.news_lookback_days < 1 or self.news_top_k < 1:
+            raise ValueError("NEWS_LOOKBACK_DAYS and NEWS_TOP_K must be positive")
+        if not self.llm_base_url.strip() or not self.llm_model.strip():
+            raise ValueError("LLM_BASE_URL and LLM_MODEL cannot be empty")
+        if not 0 <= self.llm_temperature <= 2:
+            raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
+        if self.llm_max_tokens < 1:
+            raise ValueError("LLM_MAX_TOKENS must be positive")
+        if self.llm_timeout_seconds < 1:
+            raise ValueError("LLM_TIMEOUT_SECONDS must be positive")
+        if self.llm_max_retries < 0:
+            raise ValueError("LLM_MAX_RETRIES cannot be negative")
+        if not Decimal("0") <= self.min_cash_ratio <= Decimal("1"):
+            raise ValueError("MIN_CASH_RATIO must be between 0 and 1")
+        if not Decimal("0") <= self.max_position_ratio <= Decimal("1"):
+            raise ValueError("MAX_POSITION_RATIO must be between 0 and 1")
+        if not Decimal("0") <= self.buy_fee_buffer_ratio <= Decimal("0.1"):
+            raise ValueError("BUY_FEE_BUFFER_RATIO must be between 0 and 0.1")
+        if self.max_positions < 1:
+            raise ValueError("MAX_POSITIONS must be at least 1")
+        if not 0 <= self.market_close_hour <= 23:
+            raise ValueError("MARKET_CLOSE_HOUR must be between 0 and 23")
+        if not 0 <= self.market_close_minute <= 59:
+            raise ValueError("MARKET_CLOSE_MINUTE must be between 0 and 59")
+        if self.decision_engine_mode not in {
+            "single_llm",
+            "portfolio_multi_agent",
+        }:
+            raise ValueError(
+                "DECISION_ENGINE must be 'single_llm' or 'portfolio_multi_agent'"
+            )
+        if self.llm_structured_output_mode not in {
+            "auto",
+            "json_schema",
+            "json_object",
+        }:
+            raise ValueError(
+                "LLM_STRUCTURED_OUTPUT_MODE must be 'auto', "
+                "'json_schema', or 'json_object'"
+            )
+        if self.multi_agent_shortlist_size < 1:
+            raise ValueError("MULTI_AGENT_SHORTLIST_SIZE must be at least 1")
+        if not 1 <= self.multi_agent_parallelism <= 8:
+            raise ValueError("MULTI_AGENT_PARALLELISM must be between 1 and 8")
+        if self.multi_agent_max_calls < 1:
+            raise ValueError("MULTI_AGENT_MAX_CALLS must be at least 1")
+        if not 0 <= self.multi_agent_output_retries <= 5:
+            raise ValueError("MULTI_AGENT_OUTPUT_RETRIES must be between 0 and 5")
+        if self.multi_agent_semantic_retries < 0:
+            raise ValueError("MULTI_AGENT_SEMANTIC_RETRIES cannot be negative")
+        if not 2 <= self.multi_agent_min_analysts <= 3:
+            raise ValueError("MULTI_AGENT_MIN_ANALYSTS must be between 2 and 3")
+        if not 2 <= self.multi_agent_min_risk_reviews <= 3:
+            raise ValueError(
+                "MULTI_AGENT_MIN_RISK_REVIEWS must be between 2 and 3"
+            )
+        analyst_weights = (
+            self.multi_agent_technical_weight,
+            self.multi_agent_fundamental_weight,
+            self.multi_agent_news_weight,
+        )
+        if any(
+            not math.isfinite(weight) or weight < 0
+            for weight in analyst_weights
+        ):
+            raise ValueError(
+                "MULTI_AGENT analyst weights must be finite and non-negative"
+            )
+        if sum(analyst_weights) <= 0:
+            raise ValueError("At least one MULTI_AGENT analyst weight must be positive")
+        market = self.active_market.strip().upper()
+        get_market_profile(market)
+        object.__setattr__(self, "active_market", market)
+        if not self.market_data_provider.strip():
+            raise ValueError("MARKET_DATA_PROVIDER cannot be empty")
+        if not self.universe_selector.strip():
+            raise ValueError("UNIVERSE_SELECTOR cannot be empty")
+        if not self.selection_data_provider.strip():
+            raise ValueError("SELECTION_DATA_PROVIDER cannot be empty")
+        if self.selection_history_calendar_days < 365:
+            raise ValueError(
+                "SELECTION_HISTORY_CALENDAR_DAYS must be at least 365"
+            )
+
+    @classmethod
+    def from_env(cls, project_root: Path | None = None) -> "Settings":
+        source_candidate = Path(__file__).resolve().parents[3]
+        root = (
+            project_root
+            or (
+                source_candidate
+                if (source_candidate / "pyproject.toml").exists()
+                else Path.cwd()
+            )
+        ).resolve()
+        file_environment = {
+            key: value
+            for key, value in dotenv_values(root / ".env").items()
+            if value is not None
+        }
+        environment = {**file_environment, **os.environ}
+
+        def env(name: str, default: str = "") -> str:
+            return str(environment.get(name, default))
+
+        def configured_secret(*names: str) -> str | None:
+            for name in names:
+                value = env(name).strip()
+                if value and value.lower() not in PLACEHOLDER_SECRETS:
+                    return value
+            return None
+
+        def resolved_path(name: str, default: str) -> Path:
+            value = Path(env(name, default))
+            return (value if value.is_absolute() else root / value).resolve()
+
+        configured_universe = env("UNIVERSE_PATH").strip()
+        source_universe = root / "config" / "universe.yaml"
+        packaged_universe = Path(__file__).resolve().parents[1] / "resources" / "universe.yaml"
+        if configured_universe:
+            universe_path = Path(configured_universe)
+            if not universe_path.is_absolute():
+                universe_path = root / universe_path
+        elif source_universe.exists():
+            universe_path = source_universe
+        else:
+            universe_path = packaged_universe
+
+        configured_selection = env("SELECTION_CONFIG_PATH").strip()
+        source_selection = root / "config" / "selection.json"
+        packaged_selection = (
+            Path(__file__).resolve().parents[1] / "resources" / "selection.json"
+        )
+        if configured_selection:
+            selection_config_path = Path(configured_selection)
+            if not selection_config_path.is_absolute():
+                selection_config_path = root / selection_config_path
+        elif source_selection.exists():
+            selection_config_path = source_selection
+        else:
+            selection_config_path = packaged_selection
+
+        configured_selection_data = env("SELECTION_DATA_PATH").strip()
+        selection_data_path = (
+            resolved_path("SELECTION_DATA_PATH", configured_selection_data)
+            if configured_selection_data
+            else None
+        )
+
+        app_env = env("APP_ENV", "development").strip().lower()
+        backend_api_key = configured_secret("BACKEND_API_KEY")
+        if app_env == "production" and backend_api_key is None:
+            raise ValueError("BACKEND_API_KEY is required when APP_ENV=production")
+
+        return cls(
+            project_root=root,
+            app_env=app_env,
+            backend_api_key=backend_api_key,
+            database_path=resolved_path("DATABASE_PATH", "./data/ashare_advisor.db"),
+            universe_path=universe_path.resolve(),
+            cache_path=resolved_path("CACHE_PATH", "./data/cache"),
+            execution_mode=env("DECISION_EXECUTION_MODE", "process")
+            .strip()
+            .lower(),
+            decision_workers=int(env("DECISION_WORKERS", "1")),
+            decision_queue_capacity=int(env("DECISION_QUEUE_CAPACITY", "10")),
+            decision_task_timeout_seconds=int(
+                env("DECISION_TASK_TIMEOUT_SECONDS", "600")
+            ),
+            max_as_of_skew_minutes=int(env("MAX_AS_OF_SKEW_MINUTES", "10")),
+            data_mode=env("DATA_MODE", "auto").strip().lower(),
+            tushare_token=configured_secret("TUSHARE_TOKEN"),
+            tushare_timeout_seconds=int(env("TUSHARE_TIMEOUT_SECONDS", "20")),
+            market_history_days=int(env("MARKET_HISTORY_DAYS", "400")),
+            news_lookback_days=int(env("NEWS_LOOKBACK_DAYS", "3")),
+            news_top_k=int(env("NEWS_TOP_K", "5")),
+            llm_api_key=configured_secret("LLM_API_KEY", "OPENAI_API_KEY"),
+            llm_base_url=env("LLM_BASE_URL", "https://api.openai.com/v1").rstrip(
+                "/"
+            ),
+            llm_model=env("LLM_MODEL", "gpt-4o-mini"),
+            llm_temperature=float(env("LLM_TEMPERATURE", "0")),
+            llm_max_tokens=int(env("LLM_MAX_TOKENS", "4000")),
+            llm_timeout_seconds=int(env("LLM_TIMEOUT_SECONDS", "60")),
+            llm_max_retries=int(env("LLM_MAX_RETRIES", "1")),
+            min_cash_ratio=Decimal(env("MIN_CASH_RATIO", "0.05")),
+            max_position_ratio=Decimal(env("MAX_POSITION_RATIO", "0.30")),
+            max_positions=int(env("MAX_POSITIONS", "10")),
+            buy_fee_buffer_ratio=Decimal(env("BUY_FEE_BUFFER_RATIO", "0.001")),
+            market_close_hour=int(env("MARKET_CLOSE_HOUR", "15")),
+            market_close_minute=int(env("MARKET_CLOSE_MINUTE", "15")),
+            decision_engine_mode=env("DECISION_ENGINE", "single_llm")
+            .strip()
+            .lower(),
+            llm_structured_output_mode=env(
+                "LLM_STRUCTURED_OUTPUT_MODE", "auto"
+            )
+            .strip()
+            .lower(),
+            multi_agent_shortlist_size=int(
+                env("MULTI_AGENT_SHORTLIST_SIZE", "8")
+            ),
+            multi_agent_parallelism=int(env("MULTI_AGENT_PARALLELISM", "3")),
+            multi_agent_max_calls=int(env("MULTI_AGENT_MAX_CALLS", "32")),
+            multi_agent_output_retries=int(
+                env("MULTI_AGENT_OUTPUT_RETRIES", "1")
+            ),
+            multi_agent_semantic_retries=int(
+                env("MULTI_AGENT_SEMANTIC_RETRIES", "1")
+            ),
+            multi_agent_min_analysts=int(
+                env("MULTI_AGENT_MIN_ANALYSTS", "2")
+            ),
+            multi_agent_min_risk_reviews=int(
+                env("MULTI_AGENT_MIN_RISK_REVIEWS", "2")
+            ),
+            multi_agent_technical_weight=float(
+                env("MULTI_AGENT_TECHNICAL_WEIGHT", "0.35")
+            ),
+            multi_agent_fundamental_weight=float(
+                env("MULTI_AGENT_FUNDAMENTAL_WEIGHT", "0.40")
+            ),
+            multi_agent_news_weight=float(
+                env("MULTI_AGENT_NEWS_WEIGHT", "0.25")
+            ),
+            active_market=env("ACTIVE_MARKET", "CN").strip().upper(),
+            market_data_provider=env(
+                "MARKET_DATA_PROVIDER", "tushare"
+            ).strip().lower(),
+            universe_selector=env(
+                "UNIVERSE_SELECTOR", "lightgbm"
+            ).strip().lower(),
+            selection_data_provider=env(
+                "SELECTION_DATA_PROVIDER", "tushare"
+            ).strip().lower(),
+            selection_config_path=selection_config_path.resolve(),
+            selection_data_path=selection_data_path,
+            candidate_pool_path=resolved_path(
+                "CANDIDATE_POOL_PATH", "./data/candidate_pools"
+            ),
+            selection_history_calendar_days=int(
+                env("SELECTION_HISTORY_CALENDAR_DAYS", "1100")
+            ),
+        )
+
+    def load_universe(self) -> tuple[str, list[str]]:
+        with self.universe_path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+        version = str(payload.get("version") or "unversioned")
+        profile = get_market_profile(self.active_market)
+        raw_symbols = [
+            str(item).strip().upper() for item in payload.get("symbols", [])
+        ]
+        try:
+            symbols = [
+                profile.normalize_provider_symbol(symbol)
+                for symbol in raw_symbols
+            ]
+        except ValueError as exc:
+            raise ValueError(f"Invalid symbols in universe: {exc}") from exc
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("Universe contains duplicate symbols")
+        if not symbols:
+            raise ValueError("Universe cannot be empty")
+        return version, symbols

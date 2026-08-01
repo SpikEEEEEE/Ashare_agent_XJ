@@ -184,6 +184,33 @@ Tushare 实际选股：
   --output data/manual_selection
 ```
 
+## 历史组合回测
+
+组合操作频率和候选池重选频率是两个独立参数。例如，每个交易日运行一次组合决策、
+每周收盘后重选一次候选池：
+
+```bash
+.venv/bin/ashare-backtest \
+  --start 2024-01-01 \
+  --end 2024-06-30 \
+  --decision-frequency daily \
+  --selection-frequency weekly \
+  --max-decisions 130 \
+  --engine single_llm
+```
+
+- `--decision-frequency`：`daily`、`weekly` 或 `monthly`，控制组合研究和下一交易日
+  开盘调仓的频率；
+- `--selection-frequency`：`once`、`daily`、`weekly` 或 `monthly`；`once` 保持配置文件
+  中的固定股票池，其他值会在相应周期末用当时可见数据重新生成候选池；
+- 动态候选池会一直复用到下一次重选；当前持仓始终并入每日分析范围，所以落选持仓
+  仍可被减仓或清仓；
+- `--max-decisions` 是 LLM 成本保护。日频半年通常超过默认的 24 次，需要显式提高；
+- 旧的 `--rebalance` 参数仍可运行，但已弃用，等价于 `--decision-frequency`。
+
+回测结果的 `summary.json` 会保存两个频率和 `selection_count`；`decisions.json` 会为
+每次决策记录实际使用的 `selection_session`、`candidate_pool_id` 和候选股票列表。
+
 ## 测试
 
 ```bash

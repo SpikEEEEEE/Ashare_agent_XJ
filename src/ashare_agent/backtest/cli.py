@@ -10,6 +10,7 @@ from pathlib import Path
 from ashare_agent.adapters.backtest_feed_factory import build_historical_feed
 from ashare_agent.adapters.decision_engine_factory import build_decision_engine
 from ashare_agent.adapters.risk_policy_factory import build_risk_policy
+from ashare_agent.adapters.universe_factory import build_universe_selector
 from ashare_agent.core.config import Settings
 from ashare_agent.domain.instruments import get_market_profile
 
@@ -67,9 +68,25 @@ def _parser() -> argparse.ArgumentParser:
         default=Decimal("1000000"),
     )
     parser.add_argument(
+        "--decision-frequency",
+        choices=("daily", "weekly", "monthly"),
+        default=None,
+        help="How often to run the portfolio decision engine (default: monthly)",
+    )
+    parser.add_argument(
+        "--selection-frequency",
+        choices=("once", "daily", "weekly", "monthly"),
+        default="once",
+        help=(
+            "How often to rebuild the candidate pool; 'once' keeps the "
+            "configured/static universe"
+        ),
+    )
+    parser.add_argument(
         "--rebalance",
         choices=("daily", "weekly", "monthly"),
-        default="monthly",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--max-decisions",
@@ -138,6 +155,14 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
+    if args.rebalance is not None and args.decision_frequency is not None:
+        parser.error(
+            "--rebalance is deprecated and cannot be combined with "
+            "--decision-frequency"
+        )
+    decision_frequency = (
+        args.decision_frequency or args.rebalance or "monthly"
+    )
     project_root = (
         args.project_root.resolve()
         if args.project_root is not None
@@ -161,7 +186,19 @@ def main() -> int:
             "LLM_API_KEY or OPENAI_API_KEY is required for historical decisions"
         )
 
-    if args.symbols is None:
+    dynamic_selection = args.selection_frequency != "once"
+    if dynamic_selection and args.symbols is not None:
+        parser.error(
+            "--symbols cannot be combined with dynamic --selection-frequency; "
+            "use --selection-frequency once for a fixed custom universe"
+        )
+    if dynamic_selection:
+        universe = ()
+        universe_version = (
+            f"dynamic_{settings.universe_selector}_"
+            f"{args.selection_frequency}"
+        )
+    elif args.symbols is None:
         universe_version, loaded_symbols = settings.load_universe()
         universe = tuple(loaded_symbols)
     else:
@@ -175,7 +212,8 @@ def main() -> int:
         start=args.start,
         end=args.end,
         initial_cash=args.initial_cash,
-        rebalance_frequency=args.rebalance,
+        decision_frequency=decision_frequency,
+        selection_frequency=args.selection_frequency,
         initial_rebalance=not args.no_initial_rebalance,
         max_decisions=args.max_decisions,
         commission_rate=args.commission_rate,
@@ -198,6 +236,11 @@ def main() -> int:
         decision_engine=build_decision_engine(settings),
         risk_policy=build_risk_policy(settings),
         decision_cache=decision_cache,
+        universe_selector=(
+            build_universe_selector(settings)
+            if dynamic_selection
+            else None
+        ),
     )
     result = backtester.run(
         config=config,

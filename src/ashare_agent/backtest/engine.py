@@ -9,6 +9,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ashare_agent.core.config import Settings
+from ashare_agent.domain.candidate_pool import CandidatePool
 from ashare_agent.domain.instruments import get_market_profile
 from ashare_agent.domain.models import (
     DecisionInput,
@@ -18,6 +19,7 @@ from ashare_agent.domain.models import (
 )
 from ashare_agent.ports.decision_engine import DecisionEngine
 from ashare_agent.ports.risk_policy import RiskPolicy
+from ashare_agent.ports.universe import CandidatePoolSelector
 
 from .cache import BacktestDecisionCache, decision_quality
 from .data import HistoricalDataFeed
@@ -141,6 +143,7 @@ class PortfolioBacktester:
         decision_engine: DecisionEngine,
         risk_policy: RiskPolicy | None = None,
         decision_cache: BacktestDecisionCache | None = None,
+        universe_selector: CandidatePoolSelector | None = None,
     ) -> None:
         self.settings = settings
         profile = get_market_profile(settings.active_market)
@@ -159,6 +162,7 @@ class PortfolioBacktester:
             risk_policy = build_risk_policy(settings)
         self.risk_policy = risk_policy
         self.decision_cache = decision_cache
+        self.universe_selector = universe_selector
 
     @staticmethod
     def decision_sessions(
@@ -226,6 +230,7 @@ class PortfolioBacktester:
         universe_version: str,
         data_date: date,
         execution_session: date,
+        candidate_pool: CandidatePool | None = None,
     ) -> DecisionInput:
         as_of = datetime(
             data_date.year,
@@ -264,7 +269,69 @@ class PortfolioBacktester:
             unavailable_symbols=unavailable,
             market_id=self.settings.active_market,
             data_provider=self.data_feed.name,
+            universe_source=("selected" if candidate_pool else "static"),
+            candidate_pool_id=(
+                candidate_pool.pool_id if candidate_pool else None
+            ),
+            candidate_metadata=(
+                {
+                    candidate.provider_symbol: candidate.to_dict()
+                    for candidate in candidate_pool.candidates
+                }
+                if candidate_pool
+                else {}
+            ),
         )
+
+    @staticmethod
+    def _historical_as_of(session: date) -> datetime:
+        return datetime(
+            session.year,
+            session.month,
+            session.day,
+            16,
+            0,
+            tzinfo=CHINA_TZ,
+        )
+
+    def _candidate_pools(
+        self,
+        sessions: tuple[date, ...],
+        frequency: str,
+    ) -> dict[date, CandidatePool]:
+        if frequency == "once":
+            return {}
+        if self.universe_selector is None:
+            raise ValueError(
+                "Dynamic selection frequency requires a candidate-pool selector"
+            )
+        if self.universe_selector.market != self.settings.active_market:
+            raise ValueError(
+                "Candidate-pool selector market does not match the backtest market"
+            )
+        selection_sessions = self.decision_sessions(
+            sessions,
+            frequency,
+            True,
+        )
+        pools: dict[date, CandidatePool] = {}
+        for session in sorted(selection_sessions):
+            pool = self.universe_selector.select(
+                self._historical_as_of(session),
+                data_cutoff=session,
+                force_refresh=False,
+            )
+            if pool.data_session != session.isoformat():
+                raise ValueError(
+                    "Candidate pool data session does not match its scheduled "
+                    f"selection session: {pool.data_session} != {session}"
+                )
+            pools[session] = pool
+        if not pools:
+            raise ValueError(
+                "Dynamic candidate selection produced no candidate pools"
+            )
+        return pools
 
     def _decide(
         self,
@@ -794,16 +861,18 @@ class PortfolioBacktester:
         universe: tuple[str, ...],
         universe_version: str,
     ) -> BacktestResult:
-        if not universe:
+        dynamic_selection = config.selection_frequency != "once"
+        if not universe and not dynamic_selection:
             raise ValueError("Backtest universe cannot be empty")
-        sessions = self.data_feed.prepare(
-            universe,
+        calendar_sessions = self.data_feed.sessions(
             config.start,
             config.end,
         )
+        if len(calendar_sessions) < 2:
+            raise ValueError("Backtest requires at least two trading sessions")
         decision_sessions = self.decision_sessions(
-            sessions,
-            config.rebalance_frequency,
+            calendar_sessions,
+            config.decision_frequency,
             config.initial_rebalance,
         )
         if len(decision_sessions) > config.max_decisions:
@@ -811,6 +880,31 @@ class PortfolioBacktester:
                 "Backtest would create "
                 f"{len(decision_sessions)} decisions, exceeding the configured "
                 f"maximum of {config.max_decisions}"
+            )
+        candidate_pools = self._candidate_pools(
+            calendar_sessions,
+            config.selection_frequency,
+        )
+        if candidate_pools:
+            prepared_universe = tuple(
+                dict.fromkeys(
+                    symbol
+                    for pool in candidate_pools.values()
+                    for symbol in pool.symbols
+                )
+            )
+        else:
+            prepared_universe = universe
+        if not prepared_universe:
+            raise ValueError("Backtest prepared universe cannot be empty")
+        sessions = self.data_feed.prepare(
+            prepared_universe,
+            config.start,
+            config.end,
+        )
+        if sessions != calendar_sessions:
+            raise ValueError(
+                "Historical session calendar changed while preparing prices"
             )
         next_session = {
             sessions[index]: sessions[index + 1]
@@ -821,27 +915,48 @@ class PortfolioBacktester:
         trades: list[BacktestTrade] = []
         decisions: list[dict[str, Any]] = []
         equity_curve: list[dict[str, Any]] = []
-        warnings: list[str] = [
-            (
+        warnings: list[str] = []
+        if not candidate_pools:
+            warnings.append(
                 "The configured fixed universe is reused historically; "
                 "results may contain survivorship and selection bias"
-            ),
-            (
-                "Corporate actions are represented by a start-normalized "
-                "adjustment-factor total-return price proxy"
-            ),
-            (
-                "Limit-up/limit-down queueing, intraday liquidity, market "
-                "impact, dividends in cash, and delistings are not modeled"
-            ),
-        ]
+            )
+        warnings.extend(
+            [
+                (
+                    "Corporate actions are represented by a start-normalized "
+                    "adjustment-factor total-return price proxy"
+                ),
+                (
+                    "Limit-up/limit-down queueing, intraday liquidity, market "
+                    "impact, dividends in cash, and delistings are not modeled"
+                ),
+            ]
+        )
         last_prices: dict[str, Decimal] = {}
         run_id = (
             f"bt_{config.start:%Y%m%d}_{config.end:%Y%m%d}_"
             f"{uuid4().hex[:8]}"
         )
+        active_universe = universe
+        active_universe_version = universe_version
+        active_pool: CandidatePool | None = None
+        first_pool = (
+            candidate_pools[min(candidate_pools)]
+            if candidate_pools
+            else None
+        )
+        benchmark_universe = (
+            first_pool.symbols if first_pool is not None else universe
+        )
 
         for session in sessions:
+            selected_pool = candidate_pools.get(session)
+            if selected_pool is not None:
+                active_pool = selected_pool
+                active_universe = selected_pool.symbols
+                active_universe_version = selected_pool.content_digest[:16]
+
             scheduled = pending.pop(session, None)
             if scheduled is not None:
                 decision_session, plan = scheduled
@@ -882,10 +997,11 @@ class PortfolioBacktester:
             decision_input = self._decision_input(
                 run_id=f"{run_id}_{session:%Y%m%d}",
                 account=account,
-                universe=universe,
-                universe_version=universe_version,
+                universe=active_universe,
+                universe_version=active_universe_version,
                 data_date=session,
                 execution_session=execution_session,
+                candidate_pool=active_pool,
             )
             cache_hit = False
             try:
@@ -925,6 +1041,14 @@ class PortfolioBacktester:
                 {
                     "decision_session": session.isoformat(),
                     "execution_session": execution_session.isoformat(),
+                    "selection_session": (
+                        active_pool.data_session if active_pool else None
+                    ),
+                    "candidate_pool_id": (
+                        active_pool.pool_id if active_pool else None
+                    ),
+                    "universe_version": active_universe_version,
+                    "universe": list(active_universe),
                     "cache_hit": cache_hit,
                     "llm_calls": audit["fresh_provider_calls"],
                     **audit,
@@ -954,7 +1078,7 @@ class PortfolioBacktester:
             else None
         )
         benchmark_return, benchmark_symbols = self._benchmark_return(
-            universe,
+            benchmark_universe,
             sessions,
             benchmark_entry_session,
         )
@@ -966,6 +1090,7 @@ class PortfolioBacktester:
             benchmark_return=benchmark_return,
             benchmark_symbols=benchmark_symbols,
         )
+        metrics["selection_count"] = len(candidate_pools)
         if metrics["result_quality_status"] == "invalid":
             invalid_count = (
                 metrics["degraded_decision_count"]
@@ -990,7 +1115,7 @@ class PortfolioBacktester:
         return BacktestResult(
             run_id=run_id,
             config=config,
-            universe=universe,
+            universe=prepared_universe,
             universe_version=universe_version,
             data_source=self.data_feed.name,
             decision_engine=self.settings.decision_engine_mode,

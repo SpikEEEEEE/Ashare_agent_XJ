@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-RebalanceFrequency = Literal["daily", "weekly", "monthly"]
+ScheduleFrequency = Literal["daily", "weekly", "monthly"]
+SelectionFrequency = Literal["once", "daily", "weekly", "monthly"]
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,8 @@ class BacktestConfig:
     start: date
     end: date
     initial_cash: Decimal = Decimal("1000000")
-    rebalance_frequency: RebalanceFrequency = "monthly"
+    decision_frequency: ScheduleFrequency = "monthly"
+    selection_frequency: SelectionFrequency = "once"
     initial_rebalance: bool = True
     max_decisions: int = 24
     commission_rate: Decimal = Decimal("0.0003")
@@ -34,9 +36,18 @@ class BacktestConfig:
             raise ValueError("Backtest end must be later than start")
         if self.initial_cash <= 0:
             raise ValueError("Backtest initial cash must be positive")
-        if self.rebalance_frequency not in {"daily", "weekly", "monthly"}:
+        if self.decision_frequency not in {"daily", "weekly", "monthly"}:
             raise ValueError(
-                "Rebalance frequency must be daily, weekly, or monthly"
+                "Decision frequency must be daily, weekly, or monthly"
+            )
+        if self.selection_frequency not in {
+            "once",
+            "daily",
+            "weekly",
+            "monthly",
+        }:
+            raise ValueError(
+                "Selection frequency must be once, daily, weekly, or monthly"
             )
         if self.max_decisions < 1:
             raise ValueError("Backtest max decisions must be at least 1")

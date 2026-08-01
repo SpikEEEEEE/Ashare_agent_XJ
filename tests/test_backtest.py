@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pandas as pd
@@ -11,6 +11,8 @@ import pytest
 from ashare_agent.backtest.cache import BacktestDecisionCache, decision_quality
 from ashare_agent.backtest.engine import BacktestAccount, PortfolioBacktester
 from ashare_agent.backtest.models import BacktestConfig
+from ashare_agent.domain.candidate_pool import Candidate, CandidatePool
+from ashare_agent.domain.instruments import InstrumentId
 from ashare_agent.domain.models import RawDecisionBundle, SymbolMarketSnapshot
 from ashare_agent.domain.risk import AShareRiskPolicy
 
@@ -43,6 +45,11 @@ class FakeHistoricalFeed:
 
     def prepare(self, symbols, start, end):
         assert symbols == (SYMBOL,)
+        assert start == SESSIONS[0]
+        assert end == SESSIONS[-1]
+        return SESSIONS
+
+    def sessions(self, start, end):
         assert start == SESSIONS[0]
         assert end == SESSIONS[-1]
         return SESSIONS
@@ -173,6 +180,124 @@ class FailingDecisionEngine:
         raise RuntimeError("scripted provider failure")
 
 
+SECOND_SYMBOL = "300750.SZ"
+
+
+class DynamicHistoricalFeed:
+    name = "dynamic_fake_history"
+
+    def __init__(self) -> None:
+        self.prepared_symbols: tuple[str, ...] = ()
+        self.prices = {
+            symbol: {
+                session: {
+                    "open": Decimal(str(base + index * 0.2)),
+                    "close": Decimal(str(base + 0.1 + index * 0.2)),
+                }
+                for index, session in enumerate(SESSIONS)
+            }
+            for symbol, base in ((SYMBOL, 10), (SECOND_SYMBOL, 20))
+        }
+
+    def sessions(self, start, end):
+        assert start == SESSIONS[0]
+        assert end == SESSIONS[-1]
+        return SESSIONS
+
+    def prepare(self, symbols, start, end):
+        self.prepared_symbols = symbols
+        return self.sessions(start, end)
+
+    def snapshot(self, symbol, data_date, as_of):
+        eligible = [session for session in SESSIONS if session <= data_date]
+        prices = self.prices[symbol]
+        bars = pd.DataFrame(
+            {
+                "date": eligible,
+                "open": [float(prices[item]["open"]) for item in eligible],
+                "high": [float(prices[item]["close"]) + 0.1 for item in eligible],
+                "low": [float(prices[item]["open"]) - 0.1 for item in eligible],
+                "close": [float(prices[item]["close"]) for item in eligible],
+                "volume": [100000.0] * len(eligible),
+                "vwap": [float(prices[item]["close"]) for item in eligible],
+            }
+        )
+        return SymbolMarketSnapshot(
+            symbol=symbol,
+            data_date=data_date,
+            reference_price=prices[data_date]["close"],
+            bars=bars,
+        )
+
+    def price(self, symbol, session, field):
+        return self.prices.get(symbol, {}).get(session, {}).get(field)
+
+
+class ScheduledCandidateSelector:
+    name = "scheduled_test_selector"
+    market = "CN"
+
+    def __init__(self) -> None:
+        self.calls: list[date] = []
+
+    def select(self, as_of, *, data_cutoff, force_refresh=False):
+        assert as_of.date() == data_cutoff
+        assert force_refresh is False
+        self.calls.append(data_cutoff)
+        symbol = SYMBOL if len(self.calls) % 2 else SECOND_SYMBOL
+        mic = "XSHG" if symbol.endswith(".SH") else "XSHE"
+        local_code = symbol.split(".", 1)[0]
+        return CandidatePool(
+            pool_id=f"pool_{data_cutoff:%Y%m%d}_{local_code}",
+            market="CN",
+            as_of=as_of,
+            data_session=data_cutoff.isoformat(),
+            valid_for_session=None,
+            strategy_id=self.name,
+            strategy_version="test-v1",
+            config_hash="test-config",
+            data_source="fake",
+            data_provenance={},
+            candidates=(
+                Candidate(
+                    instrument_id=InstrumentId(mic, local_code),
+                    provider_symbol=symbol,
+                    rank=1,
+                    score=1.0,
+                    reason="scheduled test candidate",
+                ),
+            ),
+            created_at=as_of.astimezone(timezone.utc),
+        )
+
+    def latest(self):
+        return None
+
+
+class RecordingHoldDecisionEngine:
+    def __init__(self) -> None:
+        self.inputs = []
+
+    def decide(self, decision_input, on_stage=None):
+        self.inputs.append(decision_input)
+        positions = decision_input.portfolio.position_map()
+        return RawDecisionBundle(
+            decisions={
+                symbol: {
+                    "action": "hold",
+                    "target_cash_amount": float(
+                        snapshot.reference_price
+                        * (positions[symbol].shares if symbol in positions else 0)
+                    ),
+                    "confidence": 0.9,
+                    "reasons": ["scheduled hold"],
+                }
+                for symbol, snapshot in decision_input.market.items()
+            },
+            meta={"calls": 1, "engine": "recording_hold"},
+        )
+
+
 def test_backtest_uses_next_open_and_writes_auditable_results(tmp_path):
     settings = make_settings(tmp_path)
     feed = FakeHistoricalFeed()
@@ -186,7 +311,7 @@ def test_backtest_uses_next_open_and_writes_auditable_results(tmp_path):
         start=SESSIONS[0],
         end=SESSIONS[-1],
         initial_cash=Decimal("100000"),
-        rebalance_frequency="monthly",
+        decision_frequency="monthly",
     )
 
     result = backtester.run(
@@ -238,6 +363,52 @@ def test_rebalance_schedule_never_decides_without_a_next_session():
     assert SESSIONS[-1] not in daily
 
 
+def test_daily_decisions_reuse_monthly_candidate_pool(tmp_path):
+    settings = make_settings(tmp_path)
+    feed = DynamicHistoricalFeed()
+    selector = ScheduledCandidateSelector()
+    engine = RecordingHoldDecisionEngine()
+    backtester = PortfolioBacktester(
+        settings=settings,
+        data_feed=feed,
+        decision_engine=engine,
+        risk_policy=AShareRiskPolicy(settings),
+        universe_selector=selector,
+    )
+    config = BacktestConfig(
+        start=SESSIONS[0],
+        end=SESSIONS[-1],
+        initial_cash=Decimal("100000"),
+        decision_frequency="daily",
+        selection_frequency="monthly",
+        max_decisions=10,
+    )
+
+    result = backtester.run(
+        config=config,
+        universe=(),
+        universe_version="dynamic_test_monthly",
+    )
+
+    assert selector.calls == [SESSIONS[0], SESSIONS[2], SESSIONS[4]]
+    assert feed.prepared_symbols == (SYMBOL, SECOND_SYMBOL)
+    assert [item.symbols for item in engine.inputs] == [
+        (SYMBOL,),
+        (SYMBOL,),
+        (SECOND_SYMBOL,),
+        (SECOND_SYMBOL,),
+        (SYMBOL,),
+    ]
+    assert result.metrics["decision_count"] == 5
+    assert result.metrics["selection_count"] == 3
+    assert result.config.to_dict()["decision_frequency"] == "daily"
+    assert result.config.to_dict()["selection_frequency"] == "monthly"
+    assert result.decisions[1]["selection_session"] == SESSIONS[0].isoformat()
+    assert result.decisions[2]["selection_session"] == SESSIONS[2].isoformat()
+    assert result.decisions[2]["candidate_pool_id"].startswith("pool_")
+    assert not any("fixed universe" in warning for warning in result.warnings)
+
+
 def test_backtest_decision_cache_replays_without_new_model_calls(tmp_path):
     settings = make_settings(tmp_path)
     scripted_engine = FiftyPercentDecisionEngine()
@@ -254,7 +425,7 @@ def test_backtest_decision_cache_replays_without_new_model_calls(tmp_path):
         start=SESSIONS[0],
         end=SESSIONS[-1],
         initial_cash=Decimal("100000"),
-        rebalance_frequency="monthly",
+        decision_frequency="monthly",
     )
 
     first = backtester.run(
@@ -438,7 +609,7 @@ def test_degraded_decisions_are_not_cached_and_invalidate_results(tmp_path):
         start=SESSIONS[0],
         end=SESSIONS[-1],
         initial_cash=Decimal("100000"),
-        rebalance_frequency="monthly",
+        decision_frequency="monthly",
     )
 
     first = backtester.run(
@@ -493,7 +664,7 @@ def test_cached_audit_metrics_separate_fresh_and_original_attempts(
         start=SESSIONS[0],
         end=SESSIONS[-1],
         initial_cash=Decimal("100000"),
-        rebalance_frequency="monthly",
+        decision_frequency="monthly",
     )
 
     first = backtester.run(
@@ -546,7 +717,7 @@ def test_failed_safe_holds_are_counted_and_mark_result_invalid(tmp_path):
             start=SESSIONS[0],
             end=SESSIONS[-1],
             initial_cash=Decimal("100000"),
-            rebalance_frequency="monthly",
+            decision_frequency="monthly",
         ),
         universe=(SYMBOL,),
         universe_version="test_v1",
@@ -579,7 +750,7 @@ def test_backtest_decision_budget_blocks_accidental_expensive_run(tmp_path):
     config = BacktestConfig(
         start=SESSIONS[0],
         end=SESSIONS[-1],
-        rebalance_frequency="daily",
+        decision_frequency="daily",
         max_decisions=2,
     )
 

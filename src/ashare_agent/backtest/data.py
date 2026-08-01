@@ -14,6 +14,13 @@ from ashare_agent.ports.market_data import DataUnavailableError, MarketDataProvi
 class HistoricalDataFeed(Protocol):
     name: str
 
+    def sessions(
+        self,
+        start: date,
+        end: date,
+    ) -> tuple[date, ...]:
+        """Return completed market sessions in the requested range."""
+
     def prepare(
         self,
         symbols: tuple[str, ...],
@@ -88,7 +95,7 @@ class TushareHistoricalDataFeed:
         start: date,
         end: date,
     ) -> tuple[date, ...]:
-        sessions = self.provider.sessions_between(start, end)
+        sessions = self.sessions(start, end)
         if len(sessions) < 2:
             raise DataUnavailableError(
                 "Backtest requires at least two trading sessions"
@@ -118,6 +125,13 @@ class TushareHistoricalDataFeed:
         self._histories = histories
         self._sessions = sessions
         return sessions
+
+    def sessions(
+        self,
+        start: date,
+        end: date,
+    ) -> tuple[date, ...]:
+        return self.provider.sessions_between(start, end)
 
     def snapshot(
         self,

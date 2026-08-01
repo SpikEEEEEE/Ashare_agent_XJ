@@ -16,8 +16,8 @@
     "generated_feature_path": null
   },
   "model": {
-    "train_lookback_days": 500,
-    "min_train_days": 240,
+    "train_lookback_days": 250,
+    "min_train_days": 180,
     "min_train_rows": 500000,
     "target_winsor_quantile": 0.01,
     "n_estimators": 300,
@@ -46,6 +46,8 @@
   "tushare": {
     "token_env": "TUSHARE_TOKEN",
     "cache_dir": "data/cache/selection/tushare/cn/v1",
+    "history_calendar_days": 550,
+    "daily_basic_min_coverage": 0.95,
     "request_interval_seconds": 0.13,
     "max_retries": 5,
     "retry_backoff_seconds": 2.0,

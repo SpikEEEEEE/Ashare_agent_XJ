@@ -33,7 +33,7 @@ def _build_lightgbm(settings: Settings) -> CandidatePoolSelector:
         data_provider=provider,
         repository=repository,
         artifacts_root=settings.candidate_pool_path / "artifacts",
-        history_calendar_days=settings.selection_history_calendar_days,
+        history_calendar_days=selection_config.tushare.history_calendar_days,
     )
 
 

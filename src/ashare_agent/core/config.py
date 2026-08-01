@@ -80,7 +80,6 @@ class Settings:
     selection_config_path: Path | None = None
     selection_data_path: Path | None = None
     candidate_pool_path: Path = Path("data/candidate_pools")
-    selection_history_calendar_days: int = 1_100
 
     def __post_init__(self) -> None:
         root = self.project_root.resolve()
@@ -198,10 +197,6 @@ class Settings:
             raise ValueError("UNIVERSE_SELECTOR cannot be empty")
         if not self.selection_data_provider.strip():
             raise ValueError("SELECTION_DATA_PROVIDER cannot be empty")
-        if self.selection_history_calendar_days < 365:
-            raise ValueError(
-                "SELECTION_HISTORY_CALENDAR_DAYS must be at least 365"
-            )
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "Settings":
@@ -358,9 +353,6 @@ class Settings:
             selection_data_path=selection_data_path,
             candidate_pool_path=resolved_path(
                 "CANDIDATE_POOL_PATH", "./data/candidate_pools"
-            ),
-            selection_history_calendar_days=int(
-                env("SELECTION_HISTORY_CALENDAR_DAYS", "1100")
             ),
         )
 

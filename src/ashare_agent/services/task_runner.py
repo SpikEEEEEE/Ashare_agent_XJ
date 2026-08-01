@@ -144,9 +144,6 @@ class DecisionTaskRunner:
                 "CANDIDATE_POOL_PATH": str(
                     self.settings.candidate_pool_path
                 ),
-                "SELECTION_HISTORY_CALENDAR_DAYS": str(
-                    self.settings.selection_history_calendar_days
-                ),
                 "LLM_API_KEY": self.settings.llm_api_key or "",
                 "LLM_BASE_URL": self.settings.llm_base_url,
                 "LLM_MODEL": self.settings.llm_model,

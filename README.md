@@ -233,3 +233,25 @@ PYTHONDONTWRITEBYTECODE=1 \
 - 不支持跨市场组合、汇率、港股实时数据或港股交易费用；
 - 第一次实际选股需要下载较长历史，耗时和 Tushare 权限取决于账号；
 - 量化结果和 LLM 输出都不代表收益保证，实盘前必须做独立样本外验证。
+
+
+ashare-select tushare-select `
+  --start-date 20200601 `
+  --end-date 20230601 `
+  --as-of 2023-06-01 `
+  --config config\selection.json `
+  --output data\selection_real_20230601 `
+  --market-output data\tushare_market_20230601.csv
+
+python -m ashare_agent.backtest.cli `
+  --start 2026-01-01 `
+  --end 2026-03-01 `
+  --decision-frequency daily `
+  --selection-frequency monthly `
+  --max-decisions 10000 `
+  --engine portfolio_multi_agent
+
+python -m ashare_agent.cli serve --host 127.0.0.1 --port 8000
+
+
+python -m streamlit run src\ashare_agent\frontend\app.py

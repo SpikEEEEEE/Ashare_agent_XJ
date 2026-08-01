@@ -116,6 +116,21 @@ class CandidatePipelineTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "positive integer"):
                     validate_config(config)
 
+    def test_config_rejects_invalid_tushare_history_window(self) -> None:
+        config = AppConfig()
+        config.tushare.history_calendar_days = 364
+
+        with self.assertRaisesRegex(ValueError, "at least 365"):
+            validate_config(config)
+
+    def test_config_rejects_invalid_daily_basic_coverage(self) -> None:
+        for coverage in (0.0, 1.01):
+            with self.subTest(coverage=coverage):
+                config = AppConfig()
+                config.tushare.daily_basic_min_coverage = coverage
+                with self.assertRaisesRegex(ValueError, "must be in"):
+                    validate_config(config)
+
     def test_csv_requires_explicit_eligibility_status_contract(self) -> None:
         source = pd.read_csv(self.data_path)
         status_columns = [

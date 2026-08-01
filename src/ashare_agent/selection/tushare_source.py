@@ -20,6 +20,8 @@ ProgressCallback = Callable[[str], None]
 
 @dataclass
 class TushareDownloadStats:
+    requested_start_date: str | None = None
+    requested_end_date: str | None = None
     trading_dates: int = 0
     daily_downloaded: int = 0
     daily_cached: int = 0
@@ -27,6 +29,11 @@ class TushareDownloadStats:
     daily_basic_cached: int = 0
     adj_factor_downloaded: int = 0
     adj_factor_cached: int = 0
+    daily_basic_missing_rows: int = 0
+    daily_basic_invalid_rows: int = 0
+    daily_basic_dropped_rows: int = 0
+    daily_basic_coverage: float = 1.0
+    daily_basic_min_session_coverage: float = 1.0
     output_rows: int = 0
     latest_trade_date: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -394,7 +401,10 @@ class TushareDataSource:
         force_refresh: bool = False,
         refresh_master: bool = False,
     ) -> tuple[pd.DataFrame, TushareDownloadStats]:
-        stats = TushareDownloadStats()
+        stats = TushareDownloadStats(
+            requested_start_date=self._date_string(start_date),
+            requested_end_date=self._date_string(end_date),
+        )
         trade_dates = self.fetch_trade_dates(
             start_date, end_date, force_refresh=refresh_master
         )
@@ -473,7 +483,10 @@ class TushareDataSource:
             force_refresh=refresh_master, warnings=stats.warnings
         )
         market = self.build_standard_market_data(
-            usable_dates, stock_basic, name_history
+            usable_dates,
+            stock_basic,
+            name_history,
+            stats=stats,
         )
         stats.output_rows = len(market)
         stats.latest_trade_date = (
@@ -500,11 +513,11 @@ class TushareDataSource:
             raise ValueError(f"{endpoint} data is missing fields: {missing}")
 
     @staticmethod
-    def _require_daily_key_coverage(
+    def _daily_key_coverage(
         daily: pd.DataFrame,
         auxiliary: pd.DataFrame,
         endpoint: str,
-    ) -> None:
+    ) -> tuple[pd.Series, float, float, list[dict[str, str]]]:
         key_columns = ["ts_code", "trade_date"]
         duplicate_keys = auxiliary.duplicated(key_columns, keep=False)
         if duplicate_keys.any():
@@ -519,15 +532,61 @@ class TushareDataSource:
             )
         daily_keys = pd.MultiIndex.from_frame(daily[key_columns])
         auxiliary_keys = pd.MultiIndex.from_frame(auxiliary[key_columns])
-        missing_keys = daily_keys.difference(auxiliary_keys)
-        if len(missing_keys):
-            sample = [
-                {"ts_code": str(ts_code), "trade_date": str(trade_date)}
-                for ts_code, trade_date in missing_keys[:5]
-            ]
+        matched = pd.Series(
+            daily_keys.isin(auxiliary_keys),
+            index=daily.index,
+            dtype=bool,
+        )
+        coverage = float(matched.mean()) if len(matched) else 1.0
+        session_coverage = matched.groupby(daily["trade_date"]).mean()
+        minimum_session_coverage = (
+            float(session_coverage.min()) if len(session_coverage) else 1.0
+        )
+        sample = (
+            daily.loc[~matched, key_columns]
+            .head(5)
+            .astype(str)
+            .to_dict("records")
+        )
+        return matched, coverage, minimum_session_coverage, sample
+
+    @staticmethod
+    def _daily_basic_valid_row_mask(daily_basic: pd.DataFrame) -> pd.Series:
+        turnover_rate = pd.to_numeric(
+            daily_basic["turnover_rate"], errors="coerce"
+        )
+        total_mv = pd.to_numeric(daily_basic["total_mv"], errors="coerce")
+        limit_status = pd.to_numeric(
+            daily_basic["limit_status"], errors="coerce"
+        )
+        return (
+            turnover_rate.notna()
+            & np.isfinite(turnover_rate)
+            & turnover_rate.ge(0)
+            & total_mv.notna()
+            & np.isfinite(total_mv)
+            & total_mv.gt(0)
+            & limit_status.notna()
+            & np.isfinite(limit_status)
+            & limit_status.between(0, 6)
+            & limit_status.mod(1).eq(0)
+        )
+
+    @classmethod
+    def _require_daily_key_coverage(
+        cls,
+        daily: pd.DataFrame,
+        auxiliary: pd.DataFrame,
+        endpoint: str,
+    ) -> None:
+        matched, _coverage, _minimum_session_coverage, sample = (
+            cls._daily_key_coverage(daily, auxiliary, endpoint)
+        )
+        missing_count = int((~matched).sum())
+        if missing_count:
             raise RuntimeError(
                 f"{endpoint} partition is incomplete for daily observations; "
-                f"missing {len(missing_keys)} keys, examples: {sample}"
+                f"missing {missing_count} keys, examples: {sample}"
             )
 
     @staticmethod
@@ -578,6 +637,8 @@ class TushareDataSource:
         trade_dates: list[str],
         stock_basic: pd.DataFrame,
         name_history: pd.DataFrame | None = None,
+        *,
+        stats: TushareDownloadStats | None = None,
     ) -> pd.DataFrame:
         daily = self._load_partitions("daily", trade_dates)
         daily_basic = self._load_partitions("daily_basic", trade_dates)
@@ -612,8 +673,68 @@ class TushareDataSource:
             ["ts_code", "trade_date", "adj_factor"],
             "adj_factor",
         )
-        self._require_daily_key_coverage(daily, daily_basic, "daily_basic")
+        raw_daily_basic_matched, _raw_coverage, _raw_minimum, _raw_sample = (
+            self._daily_key_coverage(daily, daily_basic, "daily_basic")
+        )
+        valid_daily_basic = daily_basic.loc[
+            self._daily_basic_valid_row_mask(daily_basic)
+        ].copy()
+        (
+            usable_daily_basic_matched,
+            daily_basic_coverage,
+            daily_basic_min_session_coverage,
+            daily_basic_unusable_sample,
+        ) = self._daily_key_coverage(
+            daily,
+            valid_daily_basic,
+            "daily_basic",
+        )
+        daily_basic_missing_rows = int((~raw_daily_basic_matched).sum())
+        daily_basic_dropped_rows = int((~usable_daily_basic_matched).sum())
+        daily_basic_invalid_rows = (
+            daily_basic_dropped_rows - daily_basic_missing_rows
+        )
+        required_coverage = self.config.tushare.daily_basic_min_coverage
+        if daily_basic_min_session_coverage < required_coverage:
+            raise RuntimeError(
+                "daily_basic coverage fell below configured minimum; "
+                f"minimum session coverage="
+                f"{daily_basic_min_session_coverage:.6f}, "
+                f"required={required_coverage:.6f}, "
+                f"missing {daily_basic_missing_rows} keys, "
+                f"invalid {daily_basic_invalid_rows} rows, "
+                f"examples: {daily_basic_unusable_sample}"
+            )
         self._require_daily_key_coverage(daily, adj_factor, "adj_factor")
+
+        if stats is not None:
+            stats.daily_basic_missing_rows = daily_basic_missing_rows
+            stats.daily_basic_invalid_rows = daily_basic_invalid_rows
+            stats.daily_basic_dropped_rows = daily_basic_dropped_rows
+            stats.daily_basic_coverage = daily_basic_coverage
+            stats.daily_basic_min_session_coverage = (
+                daily_basic_min_session_coverage
+            )
+        if daily_basic_dropped_rows:
+            if stats is not None:
+                stats.warnings.extend(
+                    [
+                        f"DAILY_BASIC_ROWS_DROPPED:{daily_basic_dropped_rows}",
+                        f"DAILY_BASIC_MISSING_KEYS:{daily_basic_missing_rows}",
+                        f"DAILY_BASIC_INVALID_ROWS:{daily_basic_invalid_rows}",
+                        "DAILY_BASIC_MIN_SESSION_COVERAGE:"
+                        f"{daily_basic_min_session_coverage:.6f}",
+                    ]
+                )
+            self.progress(
+                "daily_basic has "
+                f"{daily_basic_dropped_rows} missing or invalid rows; "
+                "dropping them "
+                "before feature construction "
+                f"(minimum per-session coverage "
+                f"{daily_basic_min_session_coverage:.2%})."
+            )
+            daily = daily.loc[usable_daily_basic_matched].copy()
 
         basic_columns = [
             column
@@ -625,10 +746,10 @@ class TushareDataSource:
                 "circ_mv",
                 "limit_status",
             ]
-            if column in daily_basic.columns
+            if column in valid_daily_basic.columns
         ]
         market = daily.merge(
-            daily_basic[basic_columns],
+            valid_daily_basic[basic_columns],
             on=["ts_code", "trade_date"],
             how="left",
             validate="one_to_one",

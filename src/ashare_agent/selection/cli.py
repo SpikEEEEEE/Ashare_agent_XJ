@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-from .config import load_config, write_default_config
+from .config import AppConfig, load_config, write_default_config
 from .data import load_market_data
 from .deepseek_features import (
     DeepSeekFeatureGenerator,
@@ -27,6 +27,27 @@ from .pipeline import (
     write_selection_result,
 )
 from .tushare_source import TushareDataSource
+
+
+def _resolve_tushare_date_range(
+    start_date: str | None,
+    end_date: str,
+    config: AppConfig,
+) -> tuple[str, str]:
+    end = pd.Timestamp(end_date).normalize()
+    if pd.isna(end):
+        raise ValueError(f"Invalid Tushare end date: {end_date!r}")
+    if start_date:
+        start = pd.Timestamp(start_date).normalize()
+    else:
+        start = end - pd.Timedelta(
+            days=config.tushare.history_calendar_days
+        )
+    if pd.isna(start):
+        raise ValueError(f"Invalid Tushare start date: {start_date!r}")
+    if start > end:
+        raise ValueError("Tushare start date must not be after end date")
+    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -87,7 +108,13 @@ def _build_parser() -> argparse.ArgumentParser:
     tushare_select_parser = subparsers.add_parser(
         "tushare-select", help="下载 Tushare 数据并直接生成实际候选池"
     )
-    tushare_select_parser.add_argument("--start-date", required=True)
+    tushare_select_parser.add_argument(
+        "--start-date",
+        help=(
+            "Optional; defaults to --end-date minus "
+            "tushare.history_calendar_days from the config"
+        ),
+    )
     tushare_select_parser.add_argument(
         "--end-date", default=pd.Timestamp.today().strftime("%Y%m%d")
     )
@@ -198,13 +225,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command in {"tushare-download", "tushare-select"}:
+        start_date, end_date = _resolve_tushare_date_range(
+            args.start_date,
+            args.end_date,
+            config,
+        )
+        if args.command == "tushare-select" and not args.start_date:
+            print(
+                "未指定 --start-date，按配置 "
+                f"tushare.history_calendar_days="
+                f"{config.tushare.history_calendar_days} 推导下载区间："
+                f"{start_date} 至 {end_date}",
+                file=sys.stderr,
+                flush=True,
+            )
         source = TushareDataSource(
             config,
             progress=lambda message: print(message, file=sys.stderr, flush=True),
         )
         market, stats = source.download(
-            args.start_date,
-            args.end_date,
+            start_date,
+            end_date,
             force_refresh=args.force_refresh,
             refresh_master=args.refresh_master,
         )

@@ -196,6 +196,13 @@ class TushareSourceTest(unittest.TestCase):
             market, stats = source.download(start, end)
             self.assertEqual(stats.trading_dates, len(client.dates))
             self.assertEqual(stats.output_rows, len(client.dates) * len(client.codes))
+            self.assertEqual(stats.requested_start_date, start)
+            self.assertEqual(stats.requested_end_date, end)
+            self.assertEqual(stats.daily_basic_missing_rows, 0)
+            self.assertEqual(stats.daily_basic_invalid_rows, 0)
+            self.assertEqual(stats.daily_basic_dropped_rows, 0)
+            self.assertEqual(stats.daily_basic_coverage, 1.0)
+            self.assertEqual(stats.daily_basic_min_session_coverage, 1.0)
             self.assertEqual(market.iloc[0]["volume"], 100_000.0 * 100.0)
             self.assertEqual(market.iloc[0]["amount"], 10_000.0 * 1_000.0)
             self.assertEqual(market.iloc[0]["market_cap"], 500_000.0 * 10_000.0)
@@ -304,87 +311,109 @@ class TushareSourceTest(unittest.TestCase):
                     client.dates[-1].strftime("%Y%m%d"),
                 )
 
-    def test_partial_auxiliary_partitions_fail_closed(self) -> None:
+    def test_partial_daily_basic_partitions_drop_unusable_rows(self) -> None:
         class PartialDailyBasicClient(FakeTushareClient):
             def daily_basic(self, **kwargs: object) -> pd.DataFrame:
                 return super().daily_basic(**kwargs).iloc[:-1].copy()
 
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = PartialDailyBasicClient(days=2)
+            config = tushare_test_config(Path(temp_dir) / "cache")
+            source = TushareDataSource(
+                config,
+                client=client,
+                sleep=lambda _seconds: None,
+            )
+
+            market, stats = source.download(
+                client.dates[0].strftime("%Y%m%d"),
+                client.dates[-1].strftime("%Y%m%d"),
+            )
+
+            self.assertEqual(len(market), 2 * (len(client.codes) - 1))
+            self.assertEqual(stats.daily_basic_missing_rows, 2)
+            self.assertEqual(stats.daily_basic_invalid_rows, 0)
+            self.assertEqual(stats.daily_basic_dropped_rows, 2)
+            self.assertAlmostEqual(stats.daily_basic_coverage, 24 / 25)
+            self.assertAlmostEqual(
+                stats.daily_basic_min_session_coverage,
+                24 / 25,
+            )
+            self.assertIn("DAILY_BASIC_ROWS_DROPPED:2", stats.warnings)
+
+    def test_partial_adj_factor_partitions_fail_closed(self) -> None:
         class PartialAdjFactorClient(FakeTushareClient):
             def adj_factor(self, **kwargs: object) -> pd.DataFrame:
                 return super().adj_factor(**kwargs).iloc[:-1].copy()
 
-        for client_type, endpoint in (
-            (PartialDailyBasicClient, "daily_basic"),
-            (PartialAdjFactorClient, "adj_factor"),
-        ):
-            with (
-                self.subTest(endpoint=endpoint),
-                tempfile.TemporaryDirectory() as temp_dir,
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = PartialAdjFactorClient(days=2)
+            config = tushare_test_config(Path(temp_dir) / "cache")
+            source = TushareDataSource(
+                config,
+                client=client,
+                sleep=lambda _seconds: None,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "adj_factor partition is incomplete",
             ):
-                client = client_type(days=2)
-                config = tushare_test_config(Path(temp_dir) / "cache")
-                source = TushareDataSource(
-                    config,
-                    client=client,
-                    sleep=lambda _seconds: None,
+                source.download(
+                    client.dates[0].strftime("%Y%m%d"),
+                    client.dates[-1].strftime("%Y%m%d"),
                 )
 
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    rf"{endpoint} partition is incomplete",
-                ):
-                    source.download(
-                        client.dates[0].strftime("%Y%m%d"),
-                        client.dates[-1].strftime("%Y%m%d"),
-                    )
+    def test_low_daily_basic_coverage_fails_closed(self) -> None:
+        class LowCoverageClient(FakeTushareClient):
+            def daily_basic(self, **kwargs: object) -> pd.DataFrame:
+                return super().daily_basic(**kwargs).iloc[:10].copy()
 
-    def test_malformed_auxiliary_values_fail_closed(self) -> None:
-        class MalformedAuxiliaryClient(FakeTushareClient):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = LowCoverageClient(days=2)
+            config = tushare_test_config(Path(temp_dir) / "cache")
+            source = TushareDataSource(
+                config,
+                client=client,
+                sleep=lambda _seconds: None,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "daily_basic coverage fell below configured minimum",
+            ):
+                source.download(
+                    client.dates[0].strftime("%Y%m%d"),
+                    client.dates[-1].strftime("%Y%m%d"),
+                )
+
+    def test_malformed_daily_basic_values_drop_unusable_rows(self) -> None:
+        class MalformedDailyBasicClient(FakeTushareClient):
             def __init__(
                 self,
-                endpoint: str,
                 field: str,
                 value: object,
             ):
                 super().__init__(days=2)
-                self.endpoint = endpoint
                 self.field = field
                 self.value = value
 
-            def _malform(
-                self,
-                frame: pd.DataFrame,
-                endpoint: str,
-            ) -> pd.DataFrame:
-                if self.endpoint == endpoint:
-                    frame = frame.copy()
-                    frame.loc[frame.index[0], self.field] = self.value
+            def daily_basic(self, **kwargs: object) -> pd.DataFrame:
+                frame = super().daily_basic(**kwargs).copy()
+                frame.loc[frame.index[0], self.field] = self.value
                 return frame
 
-            def daily_basic(self, **kwargs: object) -> pd.DataFrame:
-                return self._malform(
-                    super().daily_basic(**kwargs),
-                    "daily_basic",
-                )
-
-            def adj_factor(self, **kwargs: object) -> pd.DataFrame:
-                return self._malform(
-                    super().adj_factor(**kwargs),
-                    "adj_factor",
-                )
-
         cases = (
-            ("daily_basic", "turnover_rate", np.nan),
-            ("daily_basic", "total_mv", np.inf),
-            ("daily_basic", "limit_status", 7),
-            ("adj_factor", "adj_factor", 0),
+            ("turnover_rate", np.nan),
+            ("total_mv", np.inf),
+            ("limit_status", 7),
         )
-        for endpoint, field, value in cases:
+        for field, value in cases:
             with (
-                self.subTest(endpoint=endpoint, field=field),
+                self.subTest(field=field),
                 tempfile.TemporaryDirectory() as temp_dir,
             ):
-                client = MalformedAuxiliaryClient(endpoint, field, value)
+                client = MalformedDailyBasicClient(field, value)
                 config = tushare_test_config(Path(temp_dir) / "cache")
                 source = TushareDataSource(
                     config,
@@ -392,14 +421,39 @@ class TushareSourceTest(unittest.TestCase):
                     sleep=lambda _seconds: None,
                 )
 
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    rf"{endpoint} contains invalid {field}",
-                ):
-                    source.download(
-                        client.dates[0].strftime("%Y%m%d"),
-                        client.dates[-1].strftime("%Y%m%d"),
-                    )
+                market, stats = source.download(
+                    client.dates[0].strftime("%Y%m%d"),
+                    client.dates[-1].strftime("%Y%m%d"),
+                )
+                self.assertEqual(len(market), 2 * (len(client.codes) - 1))
+                self.assertEqual(stats.daily_basic_missing_rows, 0)
+                self.assertEqual(stats.daily_basic_invalid_rows, 2)
+                self.assertEqual(stats.daily_basic_dropped_rows, 2)
+
+    def test_malformed_adj_factor_values_fail_closed(self) -> None:
+        class MalformedAdjFactorClient(FakeTushareClient):
+            def adj_factor(self, **kwargs: object) -> pd.DataFrame:
+                frame = super().adj_factor(**kwargs).copy()
+                frame.loc[frame.index[0], "adj_factor"] = 0
+                return frame
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = MalformedAdjFactorClient(days=2)
+            config = tushare_test_config(Path(temp_dir) / "cache")
+            source = TushareDataSource(
+                config,
+                client=client,
+                sleep=lambda _seconds: None,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "adj_factor contains invalid adj_factor",
+            ):
+                source.download(
+                    client.dates[0].strftime("%Y%m%d"),
+                    client.dates[-1].strftime("%Y%m%d"),
+                )
 
     def test_missing_name_history_marks_historical_st_status_unknown(self) -> None:
         class MissingHistoryClient(FakeTushareClient):

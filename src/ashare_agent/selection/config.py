@@ -35,8 +35,8 @@ class FeatureConfig:
 
 @dataclass
 class ModelConfig:
-    train_lookback_days: int = 500
-    min_train_days: int = 240
+    train_lookback_days: int = 250
+    min_train_days: int = 180
     min_train_rows: int = 5_000
     target_winsor_quantile: float = 0.01
     n_estimators: int = 300
@@ -71,6 +71,8 @@ class BacktestConfig:
 class TushareConfig:
     token_env: str = "TUSHARE_TOKEN"
     cache_dir: str = "data/cache/selection/tushare/cn/v1"
+    history_calendar_days: int = 550
+    daily_basic_min_coverage: float = 0.95
     request_interval_seconds: float = 0.13
     max_retries: int = 5
     retry_backoff_seconds: float = 2.0
@@ -206,6 +208,12 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("rebalance_every_days must be positive")
     if config.tushare.request_interval_seconds < 0:
         raise ValueError("request_interval_seconds cannot be negative")
+    if config.tushare.history_calendar_days < 365:
+        raise ValueError("tushare.history_calendar_days must be at least 365")
+    if not 0 < config.tushare.daily_basic_min_coverage <= 1:
+        raise ValueError(
+            "tushare.daily_basic_min_coverage must be in (0, 1]"
+        )
     if config.tushare.max_retries < 1:
         raise ValueError("max_retries must be positive")
     if config.tushare.retry_backoff_seconds < 0:

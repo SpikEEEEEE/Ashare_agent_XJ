@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ashare_agent.adapters.candidate_review import OpenAICandidateReviewer
 from ashare_agent.adapters.ml_universe_selector import MLUniverseSelector
 from ashare_agent.adapters.selection_data import build_selection_data_provider
 from ashare_agent.core.config import Settings
 from ashare_agent.ports.universe import CandidatePoolSelector
 from ashare_agent.repositories.candidate_pool_json import (
     JsonCandidatePoolRepository,
+)
+from ashare_agent.repositories.candidate_evaluation_json import (
+    JsonCandidateEvaluationRepository,
 )
 from ashare_agent.selection.config import load_config
 
@@ -27,6 +31,11 @@ def _build_lightgbm(settings: Settings) -> CandidatePoolSelector:
     )
     provider = build_selection_data_provider(settings, selection_config)
     repository = JsonCandidatePoolRepository(settings.candidate_pool_path)
+    reviewer = (
+        OpenAICandidateReviewer(settings)
+        if selection_config.candidate_review.enabled
+        else None
+    )
     return MLUniverseSelector(
         market=settings.active_market,
         config=selection_config,
@@ -34,6 +43,10 @@ def _build_lightgbm(settings: Settings) -> CandidatePoolSelector:
         repository=repository,
         artifacts_root=settings.candidate_pool_path / "artifacts",
         history_calendar_days=selection_config.tushare.history_calendar_days,
+        reviewer=reviewer,
+        evaluation_repository=JsonCandidateEvaluationRepository(
+            settings.candidate_pool_path / "outcomes"
+        ),
     )
 
 

@@ -5,7 +5,8 @@
 ```text
 确定研究截止时点
   → 拉取并标准化横截面数据
-  → LightGBM 选股
+  → LightGBM 量化预选
+  → 候选池内 LLM 横向复核（失败时回退量化排序）
   → 保存不可变 CandidatePool
   → 候选股 ∪ 当前持仓
   → 单 LLM / 多 Agent 组合研究
@@ -24,6 +25,8 @@
 - Tushare 全 A 股增量下载、缓存和单位标准化；
 - 动量、反转、波动率、量价、Amihud 等横截面特征；
 - 严格按当时可见数据训练的 LightGBM Top-K 选择器；
+- 量化 Top-50 预选、池内 LLM 受限重排和最终 Top-20 行业约束；
+- 候选池 T+1/T+3/T+5/T+10/T+20 后验收益与复核增益跟踪；
 - DeepSeek 受限 DSL 特征生成、本地安全筛选和筛选时点血缘校验；
 - 带模型版本、配置哈希、数据来源、排名和分数的 `CandidatePool`；
 - 动态股票池自动与当前持仓取并集，确保落选持仓仍可被减仓或清仓；
@@ -139,6 +142,26 @@ GET  /api/v1/candidate-pools/latest
 GET  /api/v1/universe?source=selected
 ```
 
+候选池复核只使用 Tushare 截止到 `data_session` 的量化证据。LLM 不能加入池外
+股票、不能输出仓位或买卖指令，默认只占最终排序的 25%；低置信度意见会向中性
+收缩。如果模型调用失败，`candidate_review.failure_mode=fallback_quant` 会保留量化
+排序并在候选池诊断中记录降级原因。
+
+每次生成新候选池时，系统会复用本次 Tushare 增量数据，为历史候选池补齐已经
+到期的 T+N 表现。结果保存在 `data/candidate_pools/outcomes/`，包括等权市场超额
+收益、量化基线与 LLM 复核组合的收益差，以及量化/LLM/混合排序 IC。查看结果：
+
+```bash
+.venv/bin/ashare-agent pool-evaluation --pool-id <pool_id>
+```
+
+```text
+GET /api/v1/candidate-pools/<pool_id>/evaluation
+```
+
+LightGBM 每次仍使用严格时点的历史标签重新训练；后验结果用于验证模型和 LLM
+复核是否真的增益，不会让 LLM 根据少数输赢自动篡改因子或训练参数。
+
 为避免把长时间下载/训练暴露成无界同步 HTTP 请求，服务不提供直接刷新端点。
 在线请求请使用 `fresh_selection`，它会进入有界任务队列并受任务硬超时保护；
 运维或研究场景用命令行刷新：
@@ -146,6 +169,9 @@ GET  /api/v1/universe?source=selected
 ```bash
 .venv/bin/ashare-agent select-pool
 ```
+
+生产候选池请使用 `ashare-agent select-pool`，它包含横向复核、不可变候选池和
+后验跟踪。`ashare-select tushare-select` 保留为纯量化研究命令，不调用 LLM。
 
 只有在确认缓存损坏或需要重建全部历史分区时才使用 `--force-refresh`；该操作会
 产生大量 Provider 请求。`DATA_MODE=offline_only` 时，选股和投顾都只读缓存，

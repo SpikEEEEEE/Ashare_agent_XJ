@@ -43,6 +43,15 @@ class CandidatePoolRepository(Protocol):
     ) -> CandidatePool | None:
         """Return the newest compatible pool strictly before one session."""
 
+    def recent(
+        self,
+        market: str,
+        *,
+        before_or_equal_session: str,
+        limit: int,
+    ) -> tuple[CandidatePool, ...]:
+        """Return recent pools at or before a completed market session."""
+
 
 class UniverseSelectionError(RuntimeError):
     pass

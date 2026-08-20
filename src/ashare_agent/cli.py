@@ -11,6 +11,9 @@ from ashare_agent.adapters.market_data_factory import build_market_data_provider
 from ashare_agent.adapters.universe_factory import build_universe_selector
 from ashare_agent.core.config import Settings
 from ashare_agent.domain.instruments import get_market_profile
+from ashare_agent.repositories.candidate_evaluation_json import (
+    JsonCandidateEvaluationRepository,
+)
 
 
 _PROJECT_ROOT_ENV = "ASHARE_AGENT_PROJECT_ROOT"
@@ -39,6 +42,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     select.add_argument("--as-of")
     select.add_argument("--force-refresh", action="store_true")
+    evaluation = commands.add_parser(
+        "pool-evaluation",
+        help="Show the latest persisted T+N evaluation for a candidate pool",
+    )
+    evaluation.add_argument(
+        "--pool-id",
+        help="Defaults to the latest candidate pool for the active market",
+    )
     return parser
 
 
@@ -66,6 +77,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = Settings.from_env(project_root)
+    if args.command == "pool-evaluation":
+        pool_id = args.pool_id
+        if not pool_id:
+            latest_pool = build_universe_selector(settings).latest()
+            if latest_pool is None:
+                raise RuntimeError("No candidate pool exists yet")
+            pool_id = latest_pool.pool_id
+        evaluation = JsonCandidateEvaluationRepository(
+            settings.candidate_pool_path / "outcomes"
+        ).latest(pool_id)
+        if evaluation is None:
+            raise RuntimeError(
+                "No completed outcome horizon exists for this candidate pool"
+            )
+        print(
+            json.dumps(
+                evaluation.to_dict(),
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+            )
+        )
+        return 0
     timezone = ZoneInfo(get_market_profile(settings.active_market).timezone)
     as_of = (
         datetime.fromisoformat(args.as_of)

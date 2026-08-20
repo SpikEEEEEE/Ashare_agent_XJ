@@ -178,3 +178,31 @@ class JsonCandidatePoolRepository:
             if matches
             else None
         )
+
+    def recent(
+        self,
+        market: str,
+        *,
+        before_or_equal_session: str,
+        limit: int,
+    ) -> tuple[CandidatePool, ...]:
+        if limit < 1:
+            raise ValueError("Candidate pool recent limit must be positive")
+        pools_dir = self.root / "pools"
+        if not pools_dir.exists():
+            return ()
+        matches: list[CandidatePool] = []
+        for path in pools_dir.glob("*.json"):
+            try:
+                pool = self.get(path.stem)
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            if pool is None or pool.pool_id != path.stem:
+                continue
+            if (
+                pool.market == market.strip().upper()
+                and pool.data_session <= before_or_equal_session
+            ):
+                matches.append(pool)
+        matches.sort(key=self._recency_key, reverse=True)
+        return tuple(matches[:limit])

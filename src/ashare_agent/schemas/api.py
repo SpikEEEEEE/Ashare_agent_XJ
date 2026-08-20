@@ -168,6 +168,25 @@ class CandidatePoolResponse(StrictModel):
     diagnostics: dict[str, Any]
 
 
+class CandidatePoolEvaluationResponse(StrictModel):
+    schema_version: str
+    evaluation_id: str
+    pool_id: str
+    pool_digest: str
+    market: str
+    data_session: str
+    evaluated_at: datetime
+    data_cutoff: str
+    data_source: str
+    configured_horizons: list[int]
+    available_horizons: list[int]
+    status: Literal["pending", "partial", "complete"]
+    candidate_outcomes: list[dict[str, Any]]
+    summary: dict[str, Any]
+    review_comparison: dict[str, Any]
+    content_digest: str
+
+
 class HealthResponse(StrictModel):
     status: Literal["ok"] = "ok"
     service: str

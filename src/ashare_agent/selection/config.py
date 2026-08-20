@@ -62,6 +62,25 @@ class SelectionConfig:
 
 
 @dataclass
+class CandidateReviewConfig:
+    """Bounded LLM review applied after deterministic model screening."""
+
+    enabled: bool = False
+    preselect_k: int = 50
+    llm_weight: float = 0.25
+    failure_mode: str = "fallback_quant"
+
+
+@dataclass
+class OutcomeTrackingConfig:
+    """Point-in-time outcome tracking for immutable candidate pools."""
+
+    enabled: bool = True
+    horizons: list[int] = field(default_factory=lambda: [1, 3, 5, 10, 20])
+    max_pools_per_run: int = 30
+
+
+@dataclass
 class BacktestConfig:
     rebalance_every_days: int = 5
     max_periods: int | None = 60
@@ -113,6 +132,12 @@ class AppConfig:
     features: FeatureConfig = field(default_factory=FeatureConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
+    candidate_review: CandidateReviewConfig = field(
+        default_factory=CandidateReviewConfig
+    )
+    outcome_tracking: OutcomeTrackingConfig = field(
+        default_factory=OutcomeTrackingConfig
+    )
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     tushare: TushareConfig = field(default_factory=TushareConfig)
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
@@ -204,6 +229,23 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("max_industry_fraction must be in (0, 1]")
     if config.selection.buffer_exit_multiplier < 1:
         raise ValueError("buffer_exit_multiplier must be at least 1")
+    review = config.candidate_review
+    if review.enabled and review.preselect_k < config.selection.top_k:
+        raise ValueError("candidate_review.preselect_k cannot be smaller than top_k")
+    if review.preselect_k < 1:
+        raise ValueError("candidate_review.preselect_k must be positive")
+    if review.preselect_k > 200:
+        raise ValueError("candidate_review.preselect_k cannot exceed 200")
+    if not 0 <= review.llm_weight <= 0.5:
+        raise ValueError("candidate_review.llm_weight must be in [0, 0.5]")
+    if review.failure_mode not in {"fallback_quant", "fail_closed"}:
+        raise ValueError(
+            "candidate_review.failure_mode must be 'fallback_quant' or 'fail_closed'"
+        )
+    tracking = config.outcome_tracking
+    validate_windows("outcome_tracking.horizons", tracking.horizons)
+    if tracking.max_pools_per_run < 1 or tracking.max_pools_per_run > 500:
+        raise ValueError("outcome_tracking.max_pools_per_run must be in [1, 500]")
     if config.backtest.rebalance_every_days < 1:
         raise ValueError("rebalance_every_days must be positive")
     if config.tushare.request_interval_seconds < 0:

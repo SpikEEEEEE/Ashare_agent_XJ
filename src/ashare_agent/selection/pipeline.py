@@ -196,15 +196,20 @@ class CandidateSelector:
         self,
         scored: pd.DataFrame,
         previous_codes: Iterable[str] | None,
+        *,
+        top_k: int | None = None,
     ) -> tuple[pd.DataFrame, int]:
         selection = self.config.selection
-        target_count = min(selection.top_k, len(scored))
+        requested_count = selection.top_k if top_k is None else int(top_k)
+        if requested_count < 1:
+            raise ValueError("Selection top_k override must be positive")
+        target_count = min(requested_count, len(scored))
         industry_cap = max(
-            1, math.ceil(selection.top_k * selection.max_industry_fraction)
+            1, math.ceil(requested_count * selection.max_industry_fraction)
         )
         previous = {str(code).strip().zfill(6) for code in (previous_codes or [])}
         buffer_rank = math.ceil(
-            selection.top_k * selection.buffer_exit_multiplier
+            requested_count * selection.buffer_exit_multiplier
         )
 
         priority_rows: list[tuple[int, str]] = []
@@ -259,6 +264,8 @@ class CandidateSelector:
         prepared: PreparedData,
         as_of: str | pd.Timestamp | None = None,
         previous_codes: Iterable[str] | None = None,
+        *,
+        top_k: int | None = None,
     ) -> SelectionResult:
         (
             scored,
@@ -268,7 +275,9 @@ class CandidateSelector:
             training_days,
         ) = self._fit_and_score(prepared, as_of)
         candidates, industry_cap = self._select_with_constraints(
-            scored, previous_codes
+            scored,
+            previous_codes,
+            top_k=top_k,
         )
         diagnostics = SelectionDiagnostics(
             model_type=model.diagnostics_.model_type,

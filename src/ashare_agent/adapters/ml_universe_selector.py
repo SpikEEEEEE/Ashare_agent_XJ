@@ -14,6 +14,7 @@ from ashare_agent import __version__
 from ashare_agent.core.json_safety import sanitize_json_value
 from ashare_agent.domain.candidate_pool import Candidate, CandidatePool
 from ashare_agent.domain.instruments import MarketProfile, get_market_profile
+from ashare_agent.ports.candidate_review import CandidateReviewer
 from ashare_agent.ports.selection_data import SelectionDataProvider
 from ashare_agent.ports.universe import (
     CandidatePoolRepository,
@@ -24,8 +25,10 @@ from ashare_agent.selection.pipeline import (
     CandidateSelector,
     write_selection_result,
 )
+from ashare_agent.selection.outcomes import evaluate_candidate_pool
+from ashare_agent.selection.review import finalize_candidate_review
 
-STRATEGY_VERSION = "lightgbm-cross-sectional-v2"
+STRATEGY_VERSION = "lightgbm-cross-sectional-v3"
 
 
 class MLUniverseSelector:
@@ -42,6 +45,8 @@ class MLUniverseSelector:
         repository: CandidatePoolRepository,
         artifacts_root: Path,
         history_calendar_days: int,
+        reviewer: CandidateReviewer | None = None,
+        evaluation_repository: Any | None = None,
     ) -> None:
         self.market = market.upper()
         self.profile = get_market_profile(self.market)
@@ -50,6 +55,8 @@ class MLUniverseSelector:
         self.repository = repository
         self.artifacts_root = artifacts_root
         self.history_calendar_days = int(history_calendar_days)
+        self.reviewer = reviewer
+        self.evaluation_repository = evaluation_repository
         if self.history_calendar_days < 365:
             raise ValueError("Selection history must cover at least 365 calendar days")
         if data_provider.market.upper() != self.market:
@@ -83,6 +90,7 @@ class MLUniverseSelector:
             "features": features,
             "model": asdict(self.config.model),
             "selection": asdict(self.config.selection),
+            "candidate_review": asdict(self.config.candidate_review),
             "feature_screening": asdict(self.config.feature_screening),
         }
         encoded = json.dumps(
@@ -185,6 +193,151 @@ class MLUniverseSelector:
             },
         )
 
+    def _track_outcomes(
+        self,
+        *,
+        frame: pd.DataFrame,
+        data_cutoff: date,
+        data_source: str,
+        evaluated_at: datetime,
+    ) -> dict[str, Any]:
+        tracking = self.config.outcome_tracking
+        if not tracking.enabled:
+            return {"status": "disabled", "evaluated_pools": 0}
+        if self.evaluation_repository is None:
+            return {
+                "status": "unavailable",
+                "evaluated_pools": 0,
+                "warnings": ["OUTCOME_REPOSITORY_UNAVAILABLE"],
+            }
+        recent = getattr(self.repository, "recent", None)
+        if not callable(recent):
+            return {
+                "status": "unavailable",
+                "evaluated_pools": 0,
+                "warnings": ["CANDIDATE_POOL_RECENT_QUERY_UNAVAILABLE"],
+            }
+
+        try:
+            pools = recent(
+                self.market,
+                before_or_equal_session=data_cutoff.isoformat(),
+                limit=tracking.max_pools_per_run,
+            )
+        except Exception as exc:
+            return {
+                "status": "degraded",
+                "evaluated_pools": 0,
+                "failure_types": [type(exc).__name__],
+            }
+        saved = 0
+        skipped = 0
+        failures: list[str] = []
+        completed_horizons: dict[str, list[int]] = {}
+        for pool in pools:
+            if pool.data_session >= data_cutoff.isoformat():
+                skipped += 1
+                continue
+            try:
+                previous = self.evaluation_repository.latest(pool.pool_id)
+                if (
+                    previous is not None
+                    and previous.data_cutoff >= data_cutoff.isoformat()
+                ):
+                    skipped += 1
+                    continue
+                evaluation = evaluate_candidate_pool(
+                    pool,
+                    frame,
+                    data_cutoff=data_cutoff,
+                    data_source=data_source,
+                    horizons=tracking.horizons,
+                    evaluated_at=evaluated_at,
+                )
+                if not evaluation.available_horizons:
+                    skipped += 1
+                    continue
+                self.evaluation_repository.save(evaluation)
+                saved += 1
+                completed_horizons[pool.pool_id] = list(
+                    evaluation.available_horizons
+                )
+            except Exception as exc:
+                failures.append(type(exc).__name__)
+        return {
+            "status": "ok" if not failures else "degraded",
+            "evaluated_pools": saved,
+            "skipped_pools": skipped,
+            "completed_horizons": completed_horizons,
+            "failure_types": failures,
+        }
+
+    @staticmethod
+    def _write_final_candidate_artifact(
+        *,
+        result: Any,
+        candidates: tuple[Candidate, ...],
+        diagnostics: dict[str, Any],
+        version_dir: Path,
+    ) -> None:
+        candidate_path = version_dir / "candidates.csv"
+        quant_path = version_dir / "quant_preselection.csv"
+        if candidate_path.exists():
+            candidate_path.replace(quant_path)
+        source = result.candidates.copy()
+        if "code" not in source.columns:
+            raise ValueError("Selection artifact is missing code")
+        source["_local_code"] = source["code"].astype(str).str.strip().str.zfill(6)
+        source = source.set_index("_local_code", drop=False)
+        rows: list[dict[str, Any]] = []
+        for candidate in candidates:
+            local_code = candidate.instrument_id.local_code
+            if local_code not in source.index:
+                raise ValueError("Final candidate is absent from quant preselection")
+            raw = source.loc[local_code]
+            if isinstance(raw, pd.DataFrame):
+                raw = raw.iloc[0]
+            row = raw.to_dict()
+            row.update(
+                {
+                    "candidate_position": candidate.rank,
+                    "selection_score": candidate.score,
+                    "selection_reason": candidate.reason,
+                    "review_score": candidate.signals.get("review_score"),
+                    "review_confidence": candidate.signals.get(
+                        "review_confidence"
+                    ),
+                    "review_composite_score": candidate.signals.get(
+                        "review_composite_score"
+                    ),
+                    "review_thesis": candidate.signals.get("review_thesis"),
+                    "review_risk_flags": json.dumps(
+                        candidate.signals.get("review_risk_flags", []),
+                        ensure_ascii=False,
+                    ),
+                    "review_invalidators": json.dumps(
+                        candidate.signals.get("review_invalidators", []),
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+            rows.append(row)
+        pd.DataFrame(rows).to_csv(candidate_path, index=False)
+        diagnostics_path = version_dir / "selection_diagnostics.json"
+        quant_diagnostics_path = version_dir / "quant_selection_diagnostics.json"
+        if diagnostics_path.exists():
+            diagnostics_path.replace(quant_diagnostics_path)
+        diagnostics_path.write_text(
+            json.dumps(
+                sanitize_json_value(diagnostics),
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def select(
         self,
         as_of: datetime,
@@ -240,6 +393,11 @@ class MLUniverseSelector:
                 prepared,
                 as_of=dataset.data_cutoff,
                 previous_codes=previous_codes,
+                top_k=(
+                    self.config.candidate_review.preselect_k
+                    if self.config.candidate_review.enabled
+                    else None
+                ),
             )
             if result.diagnostics.score_date != dataset.data_cutoff.isoformat():
                 raise ValueError(
@@ -250,7 +408,7 @@ class MLUniverseSelector:
                 f"Candidate selection failed safely ({type(exc).__name__})"
             ) from exc
 
-        candidates = tuple(
+        preselected_candidates = tuple(
             self._candidate(row, rank)
             for rank, row in enumerate(
                 result.candidates.itertuples(index=False),
@@ -258,6 +416,51 @@ class MLUniverseSelector:
             )
         )
         diagnostics = asdict(result.diagnostics)
+        outcome_diagnostics = self._track_outcomes(
+            frame=dataset.frame,
+            data_cutoff=dataset.data_cutoff,
+            data_source=dataset.provider,
+            evaluated_at=as_of,
+        )
+        review_diagnostics: dict[str, Any] = {"status": "disabled"}
+        candidates = preselected_candidates
+        if self.config.candidate_review.enabled:
+            review_result = None
+            fallback_reason: str | None = None
+            try:
+                if self.reviewer is None:
+                    raise RuntimeError("Candidate reviewer is not configured")
+                review_result = self.reviewer.review(
+                    preselected_candidates,
+                    as_of=as_of,
+                    data_session=diagnostics["score_date"],
+                )
+            except Exception as exc:
+                if self.config.candidate_review.failure_mode == "fail_closed":
+                    raise UniverseSelectionError(
+                        "Candidate review failed safely"
+                    ) from exc
+                fallback_reason = type(exc).__name__
+            candidates, review_diagnostics = finalize_candidate_review(
+                preselected_candidates,
+                review=review_result,
+                config=self.config.candidate_review,
+                top_k=self.config.selection.top_k,
+                max_industry_fraction=(
+                    self.config.selection.max_industry_fraction
+                ),
+                fallback_reason=fallback_reason,
+            )
+            diagnostics["quant_preselected_stocks"] = len(
+                preselected_candidates
+            )
+            diagnostics["selected_stocks"] = len(candidates)
+        diagnostics["candidate_review"] = sanitize_json_value(
+            review_diagnostics
+        )
+        diagnostics["outcome_tracking"] = sanitize_json_value(
+            outcome_diagnostics
+        )
         data_provenance = dict(
             sanitize_json_value(dataset.provenance) or {}
         )
@@ -298,4 +501,20 @@ class MLUniverseSelector:
         )
         version_dir = self.artifacts_root / pool.pool_id
         write_selection_result(result, version_dir)
+        self._write_final_candidate_artifact(
+            result=result,
+            candidates=candidates,
+            diagnostics=diagnostics,
+            version_dir=version_dir,
+        )
+        (version_dir / "candidate_review.json").write_text(
+            json.dumps(
+                sanitize_json_value(review_diagnostics),
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         return self.repository.save(pool)

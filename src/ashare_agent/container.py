@@ -12,6 +12,9 @@ from ashare_agent.ports.market_data import MarketDataProvider
 from ashare_agent.ports.risk_policy import RiskPolicy
 from ashare_agent.ports.universe import CandidatePoolSelector
 from ashare_agent.repositories.sqlite import SQLiteRepository
+from ashare_agent.repositories.candidate_evaluation_json import (
+    JsonCandidateEvaluationRepository,
+)
 from ashare_agent.services.decision_service import DecisionService
 from ashare_agent.services.task_runner import DecisionTaskRunner
 
@@ -26,6 +29,7 @@ class AppContainer:
     decision_service: DecisionService
     task_runner: DecisionTaskRunner
     universe_selector: CandidatePoolSelector | None = None
+    evaluation_repository: JsonCandidateEvaluationRepository | None = None
 
     @classmethod
     def build(cls, settings: Settings | None = None) -> "AppContainer":
@@ -35,6 +39,9 @@ class AppContainer:
         decision_engine = build_decision_engine(effective_settings)
         risk_policy = build_risk_policy(effective_settings)
         universe_selector = build_universe_selector(effective_settings)
+        evaluation_repository = JsonCandidateEvaluationRepository(
+            effective_settings.candidate_pool_path / "outcomes"
+        )
         decision_service = DecisionService(
             repository,
             market_data,
@@ -60,4 +67,5 @@ class AppContainer:
             decision_service=decision_service,
             task_runner=task_runner,
             universe_selector=universe_selector,
+            evaluation_repository=evaluation_repository,
         )

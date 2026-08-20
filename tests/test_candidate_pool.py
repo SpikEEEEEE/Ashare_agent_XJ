@@ -13,6 +13,10 @@ from ashare_agent.domain.instruments import InstrumentId, get_market_profile
 from ashare_agent.adapters.ml_universe_selector import MLUniverseSelector
 from ashare_agent.adapters.selection_data import CsvSelectionDataProvider
 from ashare_agent.ports.selection_data import SelectionDataset
+from ashare_agent.ports.candidate_review import (
+    CandidateReviewAssessment,
+    CandidateReviewResult,
+)
 from ashare_agent.ports.universe import UniverseSelectionError
 from ashare_agent.repositories.candidate_pool_json import (
     JsonCandidatePoolRepository,
@@ -265,6 +269,8 @@ def test_ml_selector_publishes_a_candidate_pool_contract(tmp_path):
     config.model.n_jobs = 1
     config.selection.top_k = 5
     config.selection.max_industry_fraction = 0.4
+    config.candidate_review.enabled = True
+    config.candidate_review.preselect_k = 8
     frame = load_market_data(data_path, config)
     data_cutoff = frame["date"].max().date()
 
@@ -283,6 +289,26 @@ def test_ml_selector_publishes_a_candidate_pool_contract(tmp_path):
             )
 
     repository = JsonCandidatePoolRepository(tmp_path / "pools")
+
+    class KeepQuantOrderReviewer:
+        name = "fake_review"
+
+        def review(self, candidates, *, as_of, data_session):
+            del as_of, data_session
+            return CandidateReviewResult(
+                assessments=tuple(
+                    CandidateReviewAssessment(
+                        symbol=candidate.provider_symbol,
+                        score=float(101 - candidate.rank),
+                        confidence=1.0,
+                        thesis="quant evidence remains consistent",
+                    )
+                    for candidate in candidates
+                ),
+                market_view="stable",
+                meta={"calls": 1},
+            )
+
     selector = MLUniverseSelector(
         market="CN",
         config=config,
@@ -290,6 +316,7 @@ def test_ml_selector_publishes_a_candidate_pool_contract(tmp_path):
         repository=repository,
         artifacts_root=tmp_path / "artifacts",
         history_calendar_days=600,
+        reviewer=KeepQuantOrderReviewer(),
     )
     previous_queries = []
     original_previous = repository.previous
@@ -313,9 +340,18 @@ def test_ml_selector_publishes_a_candidate_pool_contract(tmp_path):
     assert [candidate.rank for candidate in pool.candidates] == [1, 2, 3, 4, 5]
     assert all(symbol.endswith((".SH", ".SZ", ".BJ")) for symbol in pool.symbols)
     assert pool.pool_id.endswith(pool.content_digest[:16])
+    assert pool.diagnostics["quant_preselected_stocks"] == 8
+    assert pool.diagnostics["candidate_review"]["status"] == "applied"
+    assert all(
+        candidate.reason == "llm_cross_sectional_review"
+        for candidate in pool.candidates
+    )
     assert len(pool.data_provenance["data_fingerprint"]) == 64
     assert previous_queries[0][1]["before_session"] == data_cutoff.isoformat()
     assert repository.latest("CN").pool_id == pool.pool_id
+    artifacts = tmp_path / "artifacts" / pool.pool_id
+    assert len(pd.read_csv(artifacts / "candidates.csv")) == 5
+    assert len(pd.read_csv(artifacts / "quant_preselection.csv")) == 8
 
 
 def test_ml_selector_rejects_provider_cutoff_that_disagrees_with_frame(tmp_path):

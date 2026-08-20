@@ -23,6 +23,7 @@ from ashare_agent.container import AppContainer
 from ashare_agent.domain.instruments import get_market_profile
 from ashare_agent.repositories.sqlite import IdempotencyConflictError
 from ashare_agent.schemas.api import (
+    CandidatePoolEvaluationResponse,
     CandidatePoolResponse,
     DecisionRunCreateRequest,
     DecisionRunResponse,
@@ -197,6 +198,28 @@ def get_latest_candidate_pool(container: Container) -> CandidatePoolResponse:
     if pool is None:
         raise HTTPException(status_code=404, detail="No candidate pool exists yet")
     return CandidatePoolResponse.model_validate(pool.to_dict())
+
+
+@protected.get(
+    "/candidate-pools/{pool_id}/evaluation",
+    response_model=CandidatePoolEvaluationResponse,
+)
+def get_candidate_pool_evaluation(
+    pool_id: str,
+    container: Container,
+) -> CandidatePoolEvaluationResponse:
+    if container.evaluation_repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Candidate outcome tracking is not configured",
+        )
+    evaluation = container.evaluation_repository.latest(pool_id)
+    if evaluation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No completed outcome horizon exists for this candidate pool",
+        )
+    return CandidatePoolEvaluationResponse.model_validate(evaluation.to_dict())
 
 
 @protected.post(

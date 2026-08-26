@@ -270,8 +270,8 @@ ashare-select tushare-select `
   --market-output data\tushare_market_20230601.csv
 
 python -m ashare_agent.backtest.cli `
-  --start 2026-01-01 `
-  --end 2026-03-01 `
+  --start 2023-01-01 `
+  --end 2023-06-01 `
   --decision-frequency daily `
   --selection-frequency monthly `
   --max-decisions 10000 `

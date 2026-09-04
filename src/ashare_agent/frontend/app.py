@@ -25,6 +25,11 @@ from ashare_agent.frontend.validation import (
 
 
 TERMINAL_STATUSES = {"completed", "degraded", "failed"}
+BOARD_SCOPE_LABELS = {
+    "main": "仅主板",
+    "main_chinext": "主板 + 创业板",
+    "main_chinext_star": "主板 + 创业板 + 科创板",
+}
 DEFAULT_POSITIONS = pd.DataFrame(
     [
         {
@@ -209,6 +214,17 @@ def _create_workspace(api: AdvisorApi) -> None:
                     "仅分析当前持仓不会提出新股票。"
                 ),
             )
+            board_scope = st.selectbox(
+                "智能选股板块范围",
+                list(BOARD_SCOPE_LABELS),
+                index=2,
+                format_func=lambda value: BOARD_SCOPE_LABELS[value],
+                disabled=mode_label != "智能选股后再平衡",
+                help=(
+                    "仅影响智能选股的训练和候选范围；北交所及 B 股不纳入"
+                    "这三个档次。当前持仓即使不在所选板块内仍会继续分析。"
+                ),
+            )
             version = st.session_state.get("universe_version")
             if version:
                 st.caption(f"当前服务器股票池版本：{version}")
@@ -317,6 +333,8 @@ def _create_workspace(api: AdvisorApi) -> None:
                 "market": market_id,
                 "universe_source": universe_source,
             }
+            if universe_source == "fresh_selection":
+                decision_payload["board_scope"] = board_scope
             if universe is not None:
                 decision_payload["universe"] = universe
             run = api.create_decision_run(
@@ -366,9 +384,14 @@ def _history_workspace(api: AdvisorApi) -> None:
     )
     selected = next(run for run in runs if run["id"] == selected_id)
     universe = selected.get("universe") or []
+    scope_caption = ""
+    if selected.get("universe_source") in {"selected", "fresh_selection"}:
+        scope = str(selected.get("board_scope") or "main_chinext_star")
+        scope_caption = f" · 范围 {BOARD_SCOPE_LABELS.get(scope, scope)}"
     st.caption(
         f"股票池：{len(universe)} 只 · 版本 {selected.get('universe_version', '—')} · "
         f"组合版本 {selected.get('portfolio_version', '—')}"
+        f"{scope_caption}"
     )
     render_decision_run(selected)
 

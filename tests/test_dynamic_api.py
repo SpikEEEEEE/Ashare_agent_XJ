@@ -21,6 +21,7 @@ class ApiCandidateSelector:
     market = "CN"
 
     def __init__(self) -> None:
+        self.board_scopes: list[str | None] = []
         self.pool = CandidatePool(
             pool_id="pool_cn_api",
             market="CN",
@@ -51,9 +52,11 @@ class ApiCandidateSelector:
         as_of,
         *,
         data_cutoff,
+        board_scope=None,
         force_refresh=False,
     ) -> CandidatePool:
         del as_of, data_cutoff, force_refresh
+        self.board_scopes.append(board_scope)
         return self.pool
 
 
@@ -94,6 +97,7 @@ def test_dynamic_decision_api_resolves_and_exposes_candidate_pool(tmp_path):
                 "portfolio_id": portfolio["id"],
                 "mode": "rebalance",
                 "universe_source": "fresh_selection",
+                "board_scope": "main",
             },
         )
 
@@ -101,6 +105,8 @@ def test_dynamic_decision_api_resolves_and_exposes_candidate_pool(tmp_path):
         run = response.json()
         assert run["status"] == "completed"
         assert run["universe_source"] == "fresh_selection"
+        assert run["board_scope"] == "main"
+        assert selector.board_scopes == ["main"]
         assert run["candidate_pool_id"] == selector.pool.pool_id
         assert run["universe"] == ["600519.SH"]
 

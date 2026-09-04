@@ -78,6 +78,11 @@ class DecisionRunCreateRequest(StrictModel):
         "selected",
         "fresh_selection",
     ] = "static"
+    board_scope: Literal[
+        "main",
+        "main_chinext",
+        "main_chinext_star",
+    ] = "main_chinext_star"
     universe: list[str] | None = Field(
         default=None,
         min_length=1,
@@ -128,6 +133,7 @@ class DecisionRunResponse(StrictModel):
     as_of: datetime
     market_id: str = "CN"
     universe_source: str = "static"
+    board_scope: str = "main_chinext_star"
     universe_version: str
     universe: list[str]
     candidate_pool_id: str | None = None

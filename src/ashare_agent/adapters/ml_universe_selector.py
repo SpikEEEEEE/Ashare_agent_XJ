@@ -20,6 +20,7 @@ from ashare_agent.ports.universe import (
     CandidatePoolRepository,
     UniverseSelectionError,
 )
+from ashare_agent.selection.boards import normalize_board_scope
 from ashare_agent.selection.config import AppConfig
 from ashare_agent.selection.pipeline import (
     CandidateSelector,
@@ -28,7 +29,7 @@ from ashare_agent.selection.pipeline import (
 from ashare_agent.selection.outcomes import evaluate_candidate_pool
 from ashare_agent.selection.review import finalize_candidate_review
 
-STRATEGY_VERSION = "lightgbm-cross-sectional-v3"
+STRATEGY_VERSION = "lightgbm-cross-sectional-v4"
 
 
 class MLUniverseSelector:
@@ -77,21 +78,22 @@ class MLUniverseSelector:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
 
-    def _config_hash(self) -> str:
-        features = asdict(self.config.features)
+    def _config_hash(self, config: AppConfig | None = None) -> str:
+        effective_config = config or self.config
+        features = asdict(effective_config.features)
         features["generated_feature_path"] = self._generated_feature_identity()
         strategy_config = {
             "application_version": __version__,
             "strategy_version": STRATEGY_VERSION,
             "dependency_versions": self._dependency_versions(),
             "history_calendar_days": self.history_calendar_days,
-            "data": asdict(self.config.data),
-            "universe": asdict(self.config.universe),
+            "data": asdict(effective_config.data),
+            "universe": asdict(effective_config.universe),
             "features": features,
-            "model": asdict(self.config.model),
-            "selection": asdict(self.config.selection),
-            "candidate_review": asdict(self.config.candidate_review),
-            "feature_screening": asdict(self.config.feature_screening),
+            "model": asdict(effective_config.model),
+            "selection": asdict(effective_config.selection),
+            "candidate_review": asdict(effective_config.candidate_review),
+            "feature_screening": asdict(effective_config.feature_screening),
         }
         encoded = json.dumps(
             strategy_config,
@@ -343,6 +345,7 @@ class MLUniverseSelector:
         as_of: datetime,
         *,
         data_cutoff: date,
+        board_scope: str | None = None,
         force_refresh: bool = False,
     ) -> CandidatePool:
         end = data_cutoff
@@ -351,7 +354,17 @@ class MLUniverseSelector:
                 "Candidate selection cutoff cannot be after as_of"
             )
         start = end - timedelta(days=self.history_calendar_days)
-        config_hash = self._config_hash()
+        resolved_board_scope = normalize_board_scope(
+            board_scope or self.config.universe.board_scope
+        )
+        effective_config = replace(
+            self.config,
+            universe=replace(
+                self.config.universe,
+                board_scope=resolved_board_scope,
+            ),
+        )
+        config_hash = self._config_hash(effective_config)
         try:
             dataset = self.data_provider.load(
                 start,
@@ -379,7 +392,7 @@ class MLUniverseSelector:
                 strategy_id=self.name,
                 config_hash=config_hash,
             )
-            selector = CandidateSelector(self.config)
+            selector = CandidateSelector(effective_config)
             prepared = selector.prepare(dataset.frame)
             previous_codes = (
                 [
@@ -394,8 +407,8 @@ class MLUniverseSelector:
                 as_of=dataset.data_cutoff,
                 previous_codes=previous_codes,
                 top_k=(
-                    self.config.candidate_review.preselect_k
-                    if self.config.candidate_review.enabled
+                    effective_config.candidate_review.preselect_k
+                    if effective_config.candidate_review.enabled
                     else None
                 ),
             )
@@ -416,6 +429,7 @@ class MLUniverseSelector:
             )
         )
         diagnostics = asdict(result.diagnostics)
+        diagnostics["board_scope"] = resolved_board_scope
         outcome_diagnostics = self._track_outcomes(
             frame=dataset.frame,
             data_cutoff=dataset.data_cutoff,
@@ -424,7 +438,7 @@ class MLUniverseSelector:
         )
         review_diagnostics: dict[str, Any] = {"status": "disabled"}
         candidates = preselected_candidates
-        if self.config.candidate_review.enabled:
+        if effective_config.candidate_review.enabled:
             review_result = None
             fallback_reason: str | None = None
             try:
@@ -436,7 +450,10 @@ class MLUniverseSelector:
                     data_session=diagnostics["score_date"],
                 )
             except Exception as exc:
-                if self.config.candidate_review.failure_mode == "fail_closed":
+                if (
+                    effective_config.candidate_review.failure_mode
+                    == "fail_closed"
+                ):
                     raise UniverseSelectionError(
                         "Candidate review failed safely"
                     ) from exc
@@ -444,10 +461,10 @@ class MLUniverseSelector:
             candidates, review_diagnostics = finalize_candidate_review(
                 preselected_candidates,
                 review=review_result,
-                config=self.config.candidate_review,
-                top_k=self.config.selection.top_k,
+                config=effective_config.candidate_review,
+                top_k=effective_config.selection.top_k,
                 max_industry_fraction=(
-                    self.config.selection.max_industry_fraction
+                    effective_config.selection.max_industry_fraction
                 ),
                 fallback_reason=fallback_reason,
             )

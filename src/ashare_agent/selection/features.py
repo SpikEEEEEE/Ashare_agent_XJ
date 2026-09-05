@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from .boards import boards_for_scope, classify_cn_board
 from .config import AppConfig
 from .generated_features import (
     DEFAULT_GENERATED_FEATURE_INPUTS,
@@ -68,6 +69,11 @@ def build_features(
     generated_definitions: list[FeatureDefinition] | None = None,
 ) -> PreparedData:
     frame = market_data.copy()
+    frame["board"] = classify_cn_board(frame)
+    allowed_boards = boards_for_scope(config.universe.board_scope)
+    frame = frame.loc[frame["board"].isin(allowed_boards)].copy()
+    if frame.empty:
+        raise ValueError("No stocks match the configured universe.board_scope")
     generated_features_available_after: pd.Timestamp | None = None
     grouped = frame.groupby("code", sort=False, group_keys=False)
     eps = 1e-12
@@ -194,6 +200,7 @@ def build_features(
     eligible = (
         frame["has_valid_market_data"]
         & frame["feature_ready"]
+        & frame["board"].isin(boards_for_scope(universe.board_scope))
         & frame["listing_days"].ge(universe.min_listing_days)
         & frame["close"].ge(universe.min_price)
         & frame["avg_amount_liquidity"].ge(universe.min_avg_amount)

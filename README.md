@@ -122,13 +122,19 @@ curl -X POST http://127.0.0.1:8000/api/v1/decision-runs \
     "portfolio_id": "上一步返回的 portfolio id",
     "mode": "rebalance",
     "market": "CN",
-    "universe_source": "fresh_selection"
+    "universe_source": "fresh_selection",
+    "board_scope": "main_chinext_star"
   }'
 ```
 
 `fresh_selection` 会在后台经历 `selecting_universe` 状态，重新计算选股结果，
 同时让数据源执行正常的增量尾部更新，选股完成后自动把候选池交给投顾。它不会
 每次强制重下全部历史。其他股票池模式：
+
+动态选股的 `board_scope` 支持三个档次：`main`（仅主板）、
+`main_chinext`（主板 + 创业板）和 `main_chinext_star`（主板 + 创业板 +
+科创板，默认）。前端“智能选股后再平衡”也提供相同选择；北交所和 B 股不在这三个
+范围内，已有持仓则始终并入分析范围。
 
 - `static`：使用 `config/universe.yaml`；
 - `selected`：使用最新候选池；不存在或交易日已过期时自动重新选股；
@@ -269,13 +275,14 @@ ashare-select tushare-select `
   --output data\selection_real_20230601 `
   --market-output data\tushare_market_20230601.csv
 
-python -m ashare_agent.backtest.cli `
-  --start 2023-01-01 `
-  --end 2023-06-01 `
-  --decision-frequency daily `
-  --selection-frequency monthly `
-  --max-decisions 10000 `
-  --engine portfolio_multi_agent
+python -m ashare_agent.backtest.cli \
+  --start 2023-01-01 \
+  --end 2023-06-01 \
+  --decision-frequency daily \
+  --selection-frequency monthly \
+  --max-decisions 10000 \
+  --engine portfolio_multi_agent \
+  --output-dir data/backtests/20230101_20230601
 
 python -m ashare_agent.cli serve --host 127.0.0.1 --port 8000
 

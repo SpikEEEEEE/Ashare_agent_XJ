@@ -53,6 +53,7 @@ def _run_response(payload: dict[str, Any]) -> DecisionRunResponse:
                 "as_of",
                 "market_id",
                 "universe_source",
+                "board_scope",
                 "universe_version",
                 "universe",
                 "candidate_pool_id",
@@ -74,6 +75,7 @@ def _request_fingerprint(
     requested_as_of: str | None,
     market_id: str,
     universe_source: str,
+    board_scope: str,
     universe_version: str,
     universe: list[str],
 ) -> str:
@@ -86,6 +88,7 @@ def _request_fingerprint(
         "requested_as_of": requested_as_of,
         "market_id": market_id,
         "universe_source": universe_source,
+        "board_scope": board_scope,
         "universe_version": universe_version,
         "universe": universe,
     }
@@ -346,12 +349,14 @@ def create_decision_run(
             idempotency_key=idempotency_key,
             market_id=request.market,
             universe_source=universe_source,
+            board_scope=request.board_scope,
             request_fingerprint=_request_fingerprint(
                 portfolio=portfolio,
                 mode=request.mode,
                 requested_as_of=requested_as_of,
                 market_id=request.market,
                 universe_source=universe_source,
+                board_scope=request.board_scope,
                 universe_version=version,
                 universe=universe,
             ),

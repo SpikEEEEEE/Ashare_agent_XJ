@@ -1,5 +1,6 @@
 {
   "universe": {
+    "board_scope": "main_chinext_star",
     "min_listing_days": 120,
     "min_price": 2.0,
     "min_avg_amount": 20000000.0,

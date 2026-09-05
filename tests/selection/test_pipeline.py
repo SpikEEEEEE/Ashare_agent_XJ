@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -99,6 +100,53 @@ class CandidatePipelineTest(unittest.TestCase):
         )
         self.assertLessEqual(int(candidates["industry"].value_counts().max()), cap)
 
+    def test_board_scope_filters_the_training_and_scoring_universe(self) -> None:
+        market = self.market.copy()
+        codes = sorted(market["code"].unique())
+        scoped_code_by_code = {
+            code: (
+                f"600{index:03d}"
+                if index < 10
+                else f"300{index:03d}"
+                if index < 20
+                else f"688{index:03d}"
+                if index < 30
+                else f"920{index:03d}"
+            )
+            for index, code in enumerate(codes)
+        }
+        market_by_code = {
+            code: (
+                "主板"
+                if index < 10
+                else "创业板"
+                if index < 20
+                else "科创板"
+                if index < 30
+                else "北交所"
+            )
+            for index, code in enumerate(codes)
+        }
+        market["market"] = market["code"].map(market_by_code)
+        market["code"] = market["code"].map(scoped_code_by_code)
+
+        expected = {
+            "main": {"main"},
+            "main_chinext": {"main", "chinext"},
+            "main_chinext_star": {"main", "chinext", "star"},
+        }
+        for scope, allowed_boards in expected.items():
+            with self.subTest(scope=scope):
+                config = deepcopy(self.config)
+                config.universe.board_scope = scope
+                prepared = build_features(market, config)
+                self.assertEqual(
+                    set(prepared.frame["board"]), allowed_boards
+                )
+                eligible = prepared.frame.loc[prepared.frame["eligible"]]
+                self.assertTrue(set(eligible["board"]).issubset(allowed_boards))
+                self.assertEqual(set(eligible["board"]), allowed_boards)
+
     def test_walk_forward_backtest_runs(self) -> None:
         selector = CandidateSelector(self.config)
         result = selector.backtest_prepared(self.prepared)
@@ -121,6 +169,13 @@ class CandidatePipelineTest(unittest.TestCase):
         config.tushare.history_calendar_days = 364
 
         with self.assertRaisesRegex(ValueError, "at least 365"):
+            validate_config(config)
+
+    def test_config_rejects_invalid_board_scope(self) -> None:
+        config = AppConfig()
+        config.universe.board_scope = "all"
+
+        with self.assertRaisesRegex(ValueError, "board_scope must be one of"):
             validate_config(config)
 
     def test_config_rejects_invalid_daily_basic_coverage(self) -> None:

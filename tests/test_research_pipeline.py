@@ -27,9 +27,10 @@ class FakeCandidatePoolSelector:
         as_of: datetime,
         *,
         data_cutoff,
+        board_scope=None,
         force_refresh: bool = False,
     ) -> CandidatePool:
-        del as_of, data_cutoff
+        del as_of, data_cutoff, board_scope
         self.select_calls.append(force_refresh)
         return self.pool
 

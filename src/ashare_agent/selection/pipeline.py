@@ -18,6 +18,7 @@ from .model import LightGBMReturnModel
 @dataclass(frozen=True)
 class SelectionDiagnostics:
     model_type: str
+    board_scope: str
     score_date: str
     training_start: str
     training_end: str
@@ -281,6 +282,7 @@ class CandidateSelector:
         )
         diagnostics = SelectionDiagnostics(
             model_type=model.diagnostics_.model_type,
+            board_scope=self.config.universe.board_scope,
             score_date=pd.Timestamp(scored["date"].iloc[0]).date().isoformat(),
             training_start=training_start.date().isoformat(),
             training_end=training_end.date().isoformat(),
@@ -447,6 +449,7 @@ def write_selection_result(
         "name",
         "industry",
         "market",
+        "board",
         "exchange",
         "candidate_position",
         "global_rank",
@@ -478,6 +481,7 @@ def write_selection_result(
         "name",
         "industry",
         "market",
+        "board",
         "exchange",
         "global_rank",
         "selection_score",

@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .boards import normalize_board_scope
+
 
 @dataclass
 class DataConfig:
@@ -15,6 +17,7 @@ class DataConfig:
 
 @dataclass
 class UniverseConfig:
+    board_scope: str = "main_chinext_star"
     min_listing_days: int = 120
     min_price: float = 2.0
     min_avg_amount: float = 20_000_000.0
@@ -193,6 +196,9 @@ def validate_config(config: AppConfig) -> None:
     validate_windows("volatility_windows", config.features.volatility_windows)
     if config.features.min_feature_history < 1:
         raise ValueError("min_feature_history must be positive")
+    config.universe.board_scope = normalize_board_scope(
+        config.universe.board_scope
+    )
     if config.universe.liquidity_window < 1:
         raise ValueError("liquidity_window must be positive")
     if config.model.min_train_days < 20:

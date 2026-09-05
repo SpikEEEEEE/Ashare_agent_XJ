@@ -69,6 +69,7 @@ class SQLiteRepository:
                     as_of TEXT NOT NULL,
                     market_id TEXT NOT NULL DEFAULT 'CN',
                     universe_source TEXT NOT NULL DEFAULT 'static',
+                    board_scope TEXT NOT NULL DEFAULT 'main_chinext_star',
                     universe_version TEXT NOT NULL,
                     universe_json TEXT NOT NULL,
                     candidate_pool_id TEXT,
@@ -106,6 +107,11 @@ class SQLiteRepository:
                 connection.execute(
                     "ALTER TABLE decision_runs "
                     "ADD COLUMN universe_source TEXT NOT NULL DEFAULT 'static'"
+                )
+            if "board_scope" not in columns:
+                connection.execute(
+                    "ALTER TABLE decision_runs ADD COLUMN board_scope TEXT "
+                    "NOT NULL DEFAULT 'main_chinext_star'"
                 )
             if "candidate_pool_id" not in columns:
                 connection.execute(
@@ -175,6 +181,11 @@ class SQLiteRepository:
                 row["universe_source"]
                 if "universe_source" in columns
                 else "static"
+            ),
+            "board_scope": (
+                row["board_scope"]
+                if "board_scope" in columns
+                else "main_chinext_star"
             ),
             "universe_version": row["universe_version"],
             "universe": json.loads(row["universe_json"]),
@@ -265,6 +276,7 @@ class SQLiteRepository:
         request_fingerprint: str,
         market_id: str = "CN",
         universe_source: str = "static",
+        board_scope: str = "main_chinext_star",
         candidate_pool_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         run_id = f"run_{uuid.uuid4().hex}"
@@ -285,10 +297,10 @@ class SQLiteRepository:
                 """
                 INSERT INTO decision_runs (
                     id, portfolio_id, portfolio_version, status, mode, as_of,
-                    market_id, universe_source, universe_version, universe_json,
-                    candidate_pool_id, input_json,
+                    market_id, universe_source, board_scope, universe_version,
+                    universe_json, candidate_pool_id, input_json,
                     idempotency_key, request_fingerprint, created_at
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -298,6 +310,7 @@ class SQLiteRepository:
                     as_of,
                     market_id,
                     universe_source,
+                    board_scope,
                     universe_version,
                     _json(universe),
                     candidate_pool_id,

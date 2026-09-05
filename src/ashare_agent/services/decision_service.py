@@ -113,10 +113,18 @@ class DecisionService:
             if source == "fresh_selection"
             else self.universe_selector.latest()
         )
+        board_scope = str(run.get("board_scope") or "main_chinext_star")
+        if pool is not None:
+            pool_scope = str(
+                pool.diagnostics.get("board_scope") or "main_chinext_star"
+            )
+            if pool_scope != board_scope:
+                pool = None
         if pool is None or pool.data_session != data_date.isoformat():
             pool = self.universe_selector.select(
                 as_of,
                 data_cutoff=data_date,
+                board_scope=board_scope,
                 # "fresh" means recompute the model output. The data adapter
                 # still performs its normal incremental tail refresh; a full
                 # historical redownload is reserved for the explicit refresh API.

@@ -15,6 +15,7 @@ class CandidatePoolSelector(Protocol):
         as_of: datetime,
         *,
         data_cutoff: date,
+        board_scope: str | None = None,
         force_refresh: bool = False,
     ) -> CandidatePool:
         """Build, persist, and return a point-in-time candidate pool."""

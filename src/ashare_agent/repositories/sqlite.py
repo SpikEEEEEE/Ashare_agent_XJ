@@ -238,6 +238,34 @@ class SQLiteRepository:
             ).fetchone()
         return self._portfolio_row(row) if row else None
 
+    def get_latest_portfolio(
+        self,
+        *,
+        market_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            if market_id is None:
+                row = connection.execute(
+                    """
+                    SELECT *
+                      FROM portfolios
+                     ORDER BY updated_at DESC, created_at DESC
+                     LIMIT 1
+                    """
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT *
+                      FROM portfolios
+                     WHERE market_id = ?
+                     ORDER BY updated_at DESC, created_at DESC
+                     LIMIT 1
+                    """,
+                    (market_id.strip().upper(),),
+                ).fetchone()
+        return self._portfolio_row(row) if row else None
+
     def update_portfolio(
         self,
         portfolio_id: str,
@@ -420,9 +448,54 @@ class SQLiteRepository:
         run_id: str,
         result: dict[str, Any],
         degraded: bool,
+        *,
+        portfolio_update: dict[str, Any] | None = None,
+        rollforward_audit: dict[str, Any] | None = None,
     ) -> None:
         status = "degraded" if degraded else "completed"
         with self._write_lock, self._connect() as connection:
+            run = connection.execute(
+                "SELECT * FROM decision_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None or run["status"] in TERMINAL_STATUSES:
+                return
+
+            persisted_result = dict(result)
+            if portfolio_update is not None:
+                portfolio_cursor = connection.execute(
+                    """
+                    UPDATE portfolios
+                       SET name = ?, cash = ?, positions_json = ?,
+                           version = version + 1, updated_at = ?
+                     WHERE id = ?
+                       AND version = ?
+                    """,
+                    (
+                        portfolio_update["name"],
+                        str(portfolio_update["cash"]),
+                        _json(portfolio_update.get("positions", [])),
+                        _now(),
+                        run["portfolio_id"],
+                        run["portfolio_version"],
+                    ),
+                )
+                applied = portfolio_cursor.rowcount == 1
+                rollforward = dict(rollforward_audit or {})
+                rollforward.update(
+                    {
+                        "status": (
+                            "applied" if applied else "skipped_version_conflict"
+                        ),
+                        "portfolio_id": run["portfolio_id"],
+                        "from_version": run["portfolio_version"],
+                        "to_version": (
+                            run["portfolio_version"] + 1 if applied else None
+                        ),
+                    }
+                )
+                persisted_result["portfolio_rollforward"] = rollforward
+
             connection.execute(
                 """
                 UPDATE decision_runs
@@ -431,7 +504,7 @@ class SQLiteRepository:
                  WHERE id = ?
                    AND status NOT IN ('completed', 'degraded', 'failed')
                 """,
-                (status, _json(result), _now(), run_id),
+                (status, _json(persisted_result), _now(), run_id),
             )
 
     def fail_decision_run(self, run_id: str, code: str, message: str) -> None:

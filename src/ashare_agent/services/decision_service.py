@@ -20,6 +20,10 @@ from ashare_agent.ports.market_data import MarketDataProvider
 from ashare_agent.ports.risk_policy import RiskPolicy
 from ashare_agent.ports.universe import CandidatePoolSelector
 from ashare_agent.repositories.sqlite import SQLiteRepository
+from ashare_agent.services.portfolio_rollforward import (
+    PortfolioRollforwardError,
+    roll_forward_portfolio,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -347,7 +351,37 @@ class DecisionService:
                 result.setdefault("warnings", []).append(
                     "No successful decision-agent call was recorded"
                 )
-            self.repository.complete_decision_run(run_id, result, degraded=degraded)
+            portfolio_update: dict[str, Any] | None = None
+            rollforward_audit: dict[str, Any] | None = None
+            try:
+                portfolio_update, rollforward_audit = roll_forward_portfolio(
+                    run["input"],
+                    result.get("decisions") or [],
+                )
+            except PortfolioRollforwardError as exc:
+                logger.error(
+                    "Portfolio roll-forward failed for %s (%s)",
+                    run_id,
+                    type(exc).__name__,
+                )
+                result["portfolio_rollforward"] = {
+                    "status": "skipped_invalid_result",
+                    "portfolio_id": run["portfolio_id"],
+                    "from_version": run["portfolio_version"],
+                    "to_version": None,
+                }
+                result.setdefault("warnings", []).append(
+                    "Current portfolio was not updated because the final target "
+                    "quantities could not be converted into a valid portfolio state"
+                )
+                degraded = True
+            self.repository.complete_decision_run(
+                run_id,
+                result,
+                degraded=degraded,
+                portfolio_update=portfolio_update,
+                rollforward_audit=rollforward_audit,
+            )
         except Exception as exc:
             failure_type = _safe_exception_type(exc)
             logger.error(

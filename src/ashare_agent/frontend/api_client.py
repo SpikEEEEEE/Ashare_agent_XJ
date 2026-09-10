@@ -98,6 +98,21 @@ class AdvisorApi:
     def create_portfolio(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/api/v1/portfolios", json=payload)
 
+    def current_portfolio(self) -> dict[str, Any] | None:
+        payload = self._request("GET", "/api/v1/portfolios/current")
+        return payload if isinstance(payload, dict) else None
+
+    def update_portfolio(
+        self,
+        portfolio_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "PUT",
+            f"/api/v1/portfolios/{portfolio_id}",
+            json=payload,
+        )
+
     def create_decision_run(
         self,
         payload: dict[str, Any],

@@ -41,13 +41,20 @@ def test_portfolio_and_decision_run_api(tmp_path):
                         "symbol": "600519.SH",
                         "shares": 100,
                         "available_shares": 100,
-                        "average_cost": "9.5",
+                        "average_cost": "9.12345678",
                     }
                 ],
             },
         )
         assert portfolio_response.status_code == 201
         assert portfolio_response.json()["market_id"] == "CN"
+        assert (
+            portfolio_response.json()["positions"][0]["average_cost"]
+            == "9.12345678"
+        )
+        current_response = client.get("/api/v1/portfolios/current")
+        assert current_response.status_code == 200
+        assert current_response.json()["id"] == portfolio_response.json()["id"]
         invalid_market_position = client.post(
             "/api/v1/portfolios",
             json={
@@ -74,6 +81,10 @@ def test_portfolio_and_decision_run_api(tmp_path):
         body = run_response.json()
         assert body["status"] == "completed"
         assert body["universe"] == ["600519.SH", "300750.SZ"]
+        assert body["result"]["portfolio_rollforward"]["status"] == "applied"
+        rolled_forward = client.get("/api/v1/portfolios/current").json()
+        assert rolled_forward["id"] == portfolio_id
+        assert rolled_forward["version"] == 2
 
         duplicate = client.post(
             "/api/v1/decision-runs",

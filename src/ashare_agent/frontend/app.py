@@ -41,6 +41,7 @@ DEFAULT_POSITIONS = pd.DataFrame(
         }
     ]
 )
+POSITION_COLUMNS = list(DEFAULT_POSITIONS.columns)
 
 
 st.set_page_config(
@@ -65,7 +66,13 @@ _state_default("api_key", "")
 _state_default("universe_text", "")
 _state_default("universe_loaded", False)
 _state_default("market_id", "CN")
-_state_default("positions_table", DEFAULT_POSITIONS)
+_state_default("positions_table", DEFAULT_POSITIONS.copy(deep=True))
+_state_default("portfolio_id", None)
+_state_default("portfolio_version", None)
+_state_default("portfolio_name", "当前投资组合")
+_state_default("portfolio_cash", 100000.0)
+_state_default("portfolio_loaded", False)
+_state_default("active_run_recovered", False)
 _state_default("active_run_id", None)
 _state_default("latest_run", None)
 _state_default("workspace", "创建投资建议")
@@ -76,6 +83,69 @@ def _api() -> AdvisorApi:
         st.session_state.api_url,
         st.session_state.api_key,
     )
+
+
+def _positions_frame(positions: list[dict[str, object]]) -> pd.DataFrame:
+    if not positions:
+        return DEFAULT_POSITIONS.copy(deep=True)
+    rows = []
+    for position in positions:
+        rows.append(
+            {
+                "symbol": position.get("symbol"),
+                "shares": position.get("shares"),
+                "available_shares": position.get("available_shares"),
+                "average_cost": float(str(position.get("average_cost") or 0)),
+                "holding_days": position.get("holding_days"),
+            }
+        )
+    return pd.DataFrame(rows, columns=POSITION_COLUMNS)
+
+
+def _load_current_portfolio(
+    api: AdvisorApi,
+    *,
+    force: bool = False,
+) -> None:
+    if st.session_state.portfolio_loaded and not force:
+        return
+    portfolio = api.current_portfolio()
+    st.session_state.portfolio_loaded = True
+    if portfolio is None:
+        return
+    st.session_state.portfolio_id = portfolio["id"]
+    st.session_state.portfolio_version = portfolio.get("version")
+    st.session_state.portfolio_name = str(
+        portfolio.get("name") or "当前投资组合"
+    )
+    st.session_state.portfolio_cash = float(portfolio.get("cash") or 0)
+    st.session_state.positions_table = _positions_frame(
+        portfolio.get("positions") or []
+    )
+    # The editor has its own widget state. Clear it when the server-side
+    # portfolio advances so it cannot mask the newly persisted dataframe.
+    st.session_state.pop("positions_editor", None)
+
+
+def _recover_active_run(api: AdvisorApi) -> None:
+    if st.session_state.active_run_id or st.session_state.active_run_recovered:
+        return
+    portfolio_id = st.session_state.portfolio_id
+    if not portfolio_id:
+        st.session_state.active_run_recovered = True
+        return
+    runs = api.decision_runs(limit=10, portfolio_id=portfolio_id)
+    st.session_state.active_run_recovered = True
+    active = next(
+        (
+            run
+            for run in runs
+            if str(run.get("status")) not in TERMINAL_STATUSES
+        ),
+        None,
+    )
+    if active is not None:
+        st.session_state.active_run_id = active["id"]
 
 
 def _sidebar() -> None:
@@ -152,6 +222,7 @@ def _poll_active_run(api: AdvisorApi) -> None:
     if run.get("status") in TERMINAL_STATUSES:
         st.session_state.latest_run = run
         st.session_state.active_run_id = None
+        _load_current_portfolio(api, force=True)
         if run.get("status") == "completed":
             st.success("组合研究和确定性风控已经完成。")
         elif run.get("status") == "degraded":
@@ -167,6 +238,11 @@ def _poll_active_run(api: AdvisorApi) -> None:
 
 def _create_workspace(api: AdvisorApi) -> None:
     _load_default_universe(api)
+    try:
+        _load_current_portfolio(api)
+        _recover_active_run(api)
+    except BackendError as exc:
+        st.warning(f"暂时无法恢复已保存的当前组合：{exc}")
     _poll_active_run(api)
 
     section_label("NEW PORTFOLIO SNAPSHOT")
@@ -189,13 +265,13 @@ def _create_workspace(api: AdvisorApi) -> None:
         with top_left:
             portfolio_name = st.text_input(
                 "组合名称",
-                value="当前投资组合",
+                value=st.session_state.portfolio_name,
                 max_chars=100,
             )
             cash = st.number_input(
                 "可用现金（元）",
                 min_value=0.0,
-                value=100000.0,
+                value=float(st.session_state.portfolio_cash),
                 step=1000.0,
                 format="%.2f",
             )
@@ -240,7 +316,13 @@ def _create_workspace(api: AdvisorApi) -> None:
         st.markdown("#### 当前持仓")
         st.caption(
             "可卖股数用于表达 A 股 T+1 限制；留空时默认等于持有股数。"
+            "任务完成后会按参考价模拟成交并持久化为下一次的当前持仓。"
         )
+        if st.session_state.portfolio_id:
+            st.caption(
+                f"已恢复组合 {st.session_state.portfolio_id} · "
+                f"版本 {st.session_state.portfolio_version or '—'}"
+            )
         positions_table = st.data_editor(
             st.session_state.positions_table,
             num_rows="dynamic",
@@ -266,8 +348,8 @@ def _create_workspace(api: AdvisorApi) -> None:
                 "average_cost": st.column_config.NumberColumn(
                     "平均成本",
                     min_value=0.0,
-                    step=0.01,
-                    format="%.2f",
+                    step=0.00000001,
+                    format="%.8f",
                 ),
                 "holding_days": st.column_config.NumberColumn(
                     "持有天数",
@@ -288,6 +370,8 @@ def _create_workspace(api: AdvisorApi) -> None:
         )
 
     st.session_state.positions_table = positions_table
+    st.session_state.portfolio_name = portfolio_name
+    st.session_state.portfolio_cash = cash
     if submitted:
         try:
             if not acknowledge:
@@ -320,13 +404,20 @@ def _create_workspace(api: AdvisorApi) -> None:
             except InvalidOperation as exc:
                 raise InputValidationError("现金必须是有效数字。") from exc
 
-            portfolio = api.create_portfolio(
-                {
-                    "name": portfolio_name,
-                    "cash": str(cash_decimal),
-                    "positions": positions,
-                }
-            )
+            portfolio_payload = {
+                "name": portfolio_name,
+                "cash": str(cash_decimal),
+                "positions": positions,
+            }
+            if st.session_state.portfolio_id:
+                portfolio = api.update_portfolio(
+                    st.session_state.portfolio_id,
+                    portfolio_payload,
+                )
+            else:
+                portfolio = api.create_portfolio(portfolio_payload)
+            st.session_state.portfolio_id = portfolio["id"]
+            st.session_state.portfolio_version = portfolio.get("version")
             decision_payload = {
                 "portfolio_id": portfolio["id"],
                 "mode": mode,
@@ -347,6 +438,8 @@ def _create_workspace(api: AdvisorApi) -> None:
                 st.session_state.active_run_id = None
             else:
                 st.session_state.active_run_id = run["id"]
+            st.session_state.portfolio_loaded = False
+            st.session_state.active_run_recovered = True
             st.rerun()
         except (BackendError, InputValidationError) as exc:
             st.error(str(exc))

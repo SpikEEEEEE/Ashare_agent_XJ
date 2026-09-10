@@ -466,6 +466,22 @@ def render_decision_run(run: dict[str, Any]) -> None:
             for warning in warnings:
                 st.write(f"• {warning}")
 
+    rollforward = result.get("portfolio_rollforward") or {}
+    rollforward_status = str(rollforward.get("status") or "")
+    if rollforward_status == "applied":
+        st.success(
+            "该建议已按参考价模拟成交并写入当前组合"
+            f"（版本 {rollforward.get('from_version')} → "
+            f"{rollforward.get('to_version')}，模拟后现金 "
+            f"¥{float(rollforward.get('cash_after') or 0):,.2f}）。"
+        )
+    elif rollforward_status == "skipped_version_conflict":
+        st.warning(
+            "该建议保留在历史档案中，但当前组合已有更新，因此没有用旧版本建议覆盖它。"
+        )
+    elif rollforward_status == "skipped_invalid_result":
+        st.warning("该建议已归档，但无法安全地结转为当前组合。")
+
     tabs = st.tabs(
         [
             "投资建议",
@@ -505,7 +521,8 @@ def render_decision_run(run: dict[str, Any]) -> None:
             st.info("本次任务没有产生可执行的建议，系统保持安全持有。")
         st.markdown(
             '<div class="audit-note">界面展示的是投资建议，不会向券商提交订单。'
-            "最终目标股数已经过现金、整手、T+1、仓位与数据质量约束。</div>",
+            "最终目标股数已经过现金、整手、T+1、仓位与数据质量约束；"
+            "完成后只在本系统内按参考价模拟成交并结转持仓。</div>",
             unsafe_allow_html=True,
         )
 

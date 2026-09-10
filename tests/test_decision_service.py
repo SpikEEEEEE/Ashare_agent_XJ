@@ -170,3 +170,85 @@ def test_decision_engine_failure_is_sanitized_and_marked_failed_quality(
         == "failed_safe_hold"
     )
     assert secret not in persisted
+
+
+def test_completed_decision_rolls_targets_into_persisted_current_portfolio(
+    tmp_path,
+):
+    settings = make_settings(tmp_path)
+    repository = SQLiteRepository(settings.database_path)
+    repository.initialize()
+    portfolio = repository.create_portfolio(
+        {
+            "name": "precise costs",
+            "cash": "10000",
+            "positions": [
+                {
+                    "symbol": "600519.SH",
+                    "shares": 100,
+                    "available_shares": 100,
+                    "average_cost": "9.12345678",
+                    "holding_days": 12,
+                }
+            ],
+        }
+    )
+    engine = FakeDecisionEngine(
+        decisions={
+            "600519.SH": {
+                "action": "increase",
+                "target_cash_amount": 2000,
+                "confidence": 0.9,
+                "reasons": ["increase existing"],
+            },
+            "300750.SZ": {
+                "action": "increase",
+                "target_cash_amount": 1000,
+                "confidence": 0.8,
+                "reasons": ["open new"],
+            },
+        }
+    )
+    service = DecisionService(
+        repository,
+        FakeMarketData(),
+        engine,
+        AShareRiskPolicy(settings),
+    )
+    run, _ = repository.create_decision_run(
+        portfolio=portfolio,
+        mode="rebalance",
+        as_of=datetime.now(tz=ZoneInfo("Asia/Shanghai")).isoformat(),
+        universe_version="test_v1",
+        universe=["600519.SH", "300750.SZ"],
+        idempotency_key=None,
+        request_fingerprint="roll-forward-test",
+    )
+
+    service.run(run["id"])
+
+    completed = repository.get_decision_run(run["id"])
+    current = repository.get_latest_portfolio(market_id="CN")
+    assert completed is not None
+    assert current is not None
+    assert completed["status"] == "completed"
+    assert completed["result"]["portfolio_rollforward"]["status"] == "applied"
+    assert completed["result"]["portfolio_rollforward"]["to_version"] == 2
+    assert current["id"] == portfolio["id"]
+    assert current["version"] == 2
+    assert current["cash"] == "8000.0"
+    positions = {item["symbol"]: item for item in current["positions"]}
+    assert positions["600519.SH"] == {
+        "symbol": "600519.SH",
+        "shares": 200,
+        "available_shares": 100,
+        "average_cost": "9.56172839",
+        "holding_days": 12,
+    }
+    assert positions["300750.SZ"] == {
+        "symbol": "300750.SZ",
+        "shares": 100,
+        "available_shares": 0,
+        "average_cost": "10.0",
+        "holding_days": 0,
+    }

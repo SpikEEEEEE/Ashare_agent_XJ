@@ -81,7 +81,10 @@ def _request_fingerprint(
 ) -> str:
     logical_request = {
         "portfolio_id": portfolio["id"],
-        "portfolio_version": portfolio["version"],
+        # Completing a run advances the mutable current-portfolio version.
+        # Idempotency follows the HTTP request identity (portfolio id + request
+        # options), so a retry after that automatic advance still returns the
+        # original run instead of conflicting with its own side effect.
         "mode": mode,
         # A server-generated current timestamp is intentionally excluded so a
         # retry of the same request remains idempotent.
@@ -243,6 +246,18 @@ def create_portfolio(
         market_id=container.settings.active_market,
     )
     return PortfolioResponse.model_validate(portfolio)
+
+
+@protected.get("/portfolios/current", response_model=PortfolioResponse | None)
+def get_current_portfolio(container: Container) -> PortfolioResponse | None:
+    portfolio = container.repository.get_latest_portfolio(
+        market_id=container.settings.active_market,
+    )
+    return (
+        PortfolioResponse.model_validate(portfolio)
+        if portfolio is not None
+        else None
+    )
 
 
 @protected.get("/portfolios/{portfolio_id}", response_model=PortfolioResponse)

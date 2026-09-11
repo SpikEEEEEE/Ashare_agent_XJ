@@ -27,6 +27,23 @@ from .portfolio_schemas import (
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
+A_SHARE_QUANTITY_GUIDANCE = (
+    "When planning or reviewing a CN A-share allocation, reason only in "
+    "whole-number shares and never imply fractional shares. Make the allocation "
+    "intent compatible with the symbol's exchange and board: Shanghai/Shenzhen "
+    "main-board and ChiNext competitive-auction buys use 100 shares or integer "
+    "multiples of 100; their sales may use 100-share lots and may include the "
+    "entire odd-lot remainder below 100, but the odd-lot remainder must never be "
+    "split. STAR Market buys and sells are at least 200 shares, with quantities "
+    "above 200 increasing in one-share increments, and a remaining balance below "
+    "200 must be sold in full in one sale. Beijing Stock Exchange buys and sells "
+    "are at least 100 shares, may increase in one-share increments, and a remaining "
+    "balance below 100 must be sold in full in one sale. Never plan a sale above "
+    "the available shares. The output schema may express weights rather than share "
+    "counts, but the intended allocation should still respect these quantity rules. "
+)
+
+
 class PortfolioAgentGraphError(ValueError):
     """A graph node produced an unusable or internally inconsistent result."""
 
@@ -851,6 +868,7 @@ class PortfolioAgentGraph:
                 "emit share quantities or orders. Cover every shortlisted symbol exactly "
                 "once, including zero-weight exits. If decision_quality is reduce-only, no "
                 "target may exceed its current weight. "
+                + A_SHARE_QUANTITY_GUIDANCE
                 + UNTRUSTED_DATA_INSTRUCTION
             ),
             payload={
@@ -926,7 +944,12 @@ class PortfolioAgentGraph:
         def run(stance: str) -> PortfolioRiskReview:
             return self._invoke_validated(
                 agent_name=f"{stance}_risk_reviewer",
-                system_prompt=prompts[stance] + " " + UNTRUSTED_DATA_INSTRUCTION,
+                system_prompt=(
+                    prompts[stance]
+                    + " "
+                    + A_SHARE_QUANTITY_GUIDANCE
+                    + UNTRUSTED_DATA_INSTRUCTION
+                ),
                 payload=base_payload,
                 response_model=PortfolioRiskReview,
                 validator=lambda review: self._validate_risk_review(
@@ -1037,6 +1060,7 @@ class PortfolioAgentGraph:
                 "enforce the hard arithmetic constraints. Cover every shortlisted symbol "
                 "exactly once, including zero-weight exits. If decision_quality is "
                 "reduce-only, no target may exceed its current weight. "
+                + A_SHARE_QUANTITY_GUIDANCE
                 + UNTRUSTED_DATA_INSTRUCTION
             ),
             payload={

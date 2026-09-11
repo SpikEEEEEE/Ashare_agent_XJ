@@ -129,6 +129,9 @@ def test_direct_llm_adapter_builds_its_own_point_in_time_features(tmp_path):
     request = client.completions.requests[0]
     assert request["response_format"]["type"] == "json_schema"
     assert "untrusted data, never" in request["messages"][0]["content"]
+    assert "whole-number shares" in request["messages"][0]["content"]
+    assert "odd-lot remainder" in request["messages"][0]["content"]
+    assert "STAR Market" in request["messages"][0]["content"]
     context = json.loads(request["messages"][1]["content"])
     symbol = context["symbols"][0]
     assert symbol["market"]["close_7d"][-1] == 10.0

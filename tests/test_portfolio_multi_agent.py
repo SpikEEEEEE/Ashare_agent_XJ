@@ -118,6 +118,7 @@ class ScriptedPortfolioAgents:
         self.failed_risk_reviewers = failed_risk_reviewers or set()
         self.calls: list[str] = []
         self.payloads: dict[str, dict[str, Any]] = {}
+        self.system_prompts: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def invoke(
@@ -128,10 +129,10 @@ class ScriptedPortfolioAgents:
         payload: dict[str, Any],
         response_model: type[Any],
     ) -> Any:
-        del system_prompt
         with self._lock:
             self.calls.append(agent_name)
             self.payloads[agent_name] = payload
+            self.system_prompts[agent_name] = system_prompt
 
         role = agent_name.removesuffix("_repair")
         if role in self.failed_analysts or role in self.failed_risk_reviewers:
@@ -308,6 +309,19 @@ def test_pool_graph_produces_one_coherent_allocation(tmp_path):
     assert bundle.decisions["300750.SZ"]["target_cash_amount"] == 2200.0
     assert bundle.meta["calls"] == 11
     assert bundle.meta["agent_artifacts"]["shortlist"] == list(SYMBOLS)
+
+    for agent_name in (
+        "portfolio_trader",
+        "aggressive_risk_reviewer",
+        "neutral_risk_reviewer",
+        "conservative_risk_reviewer",
+        "portfolio_manager",
+    ):
+        prompt = agents.system_prompts[agent_name]
+        assert "whole-number shares" in prompt
+        assert "odd-lot remainder" in prompt
+        assert "STAR Market" in prompt
+        assert "Beijing Stock Exchange" in prompt
 
     for role in ("technical", "fundamental", "news"):
         symbols = {
